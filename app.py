@@ -9,6 +9,8 @@ from io import BytesIO
 
 import pandas as pd
 import streamlit as st
+ModuleNotFoundError: No module named 'xlsxwriter'
+
 
 st.set_page_config(page_title="시험 시감 자동 편성", layout="wide")
 

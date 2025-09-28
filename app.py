@@ -2,7 +2,10 @@
 # 시험 시감 자동 편성 (순번 고정 / 학년·일자별 교시 / 학급 단위 2인 배정: 정·부감독 / 제외: 시간·반·시간+반 / 시각화 중심)
 
 from collections import defaultdict
-from datetime import datetime\nimport re\nfrom io import BytesIO
+from datetime import datetime
+import re
+from io import BytesIO
+
 
 import pandas as pd
 import streamlit as st

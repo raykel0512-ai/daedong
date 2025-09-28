@@ -57,17 +57,24 @@ st.sidebar.markdown("---")
 # -----------------------------
 st.subheader("1) 교사 명단 업로드")
 st.write(
-    "CSV 파일을 업로드하세요. **필수 열**: `name`. **선택 열**: `exclude`.\n"
-    "- 시간 제외: `D1P2`\n"
-    "- 반 제외(모든 시간): `1-3` 또는 `C1-3` (1학년 3반)\n"
-    "- 특정 시간+반 제외: `D1P2@1-3` (1일차 2교시의 1학년 3반 제외)\n"
-    "여러 항목은 세미콜론(;)으로 구분하세요. 예: `D1P2; 2-4; D2P1@3-7`"
+    "CSV 파일을 업로드하세요. **필수 열**: `name`. **선택 열**: `exclude`, `priority`(우선순위: 숫자, 작을수록 우선).
+"
+    "- 시간 제외: `D1P2`
+"
+    "- 반 제외(모든 시간): `1-3` 또는 `C1-3` (1학년 3반)
+"
+    "- 특정 시간+반 제외: `D1P2@1-3` (1일차 2교시의 1학년 3반 제외)
+"
+    "- 우선순위 예: `priority`=1이면 높은 우선, 2는 그 다음… (없으면 모두 동일로 간주)
+"
+    "여러 제외 항목은 세미콜론(;)으로 구분하세요. 예: `D1P2; 2-4; D2P1@3-7`"
 )
 
 # 샘플/템플릿 다운로드
 sample_df = pd.DataFrame({
     "name": [f"교사{i:02d}" for i in range(1, 41)],
     "exclude": ["", "D1P2", "2-3", "D2P1@1-4", "", "", "3-7", "D1P1; D3P2@2-1"] + [""] * 32,
+    "priority": [1,1,2,2,3,3] + [None]*34,
 })
 col_s1, col_s2 = st.columns(2)
 with col_s1:
@@ -79,7 +86,7 @@ with col_s1:
         use_container_width=True
     )
 with col_s2:
-    empty_df = pd.DataFrame({"name": [], "exclude": []})
+    empty_df = pd.DataFrame({"name": [], "exclude": [], "priority": []})
     st.download_button(
         "빈 템플릿 내려받기",
         data=empty_df.to_csv(index=False).encode("utf-8-sig"),
@@ -102,11 +109,14 @@ if uploaded is not None:
         st.stop()
     if "exclude" not in df_teachers.columns:
         df_teachers["exclude"] = ""
+    if "priority" not in df_teachers.columns:
+        df_teachers["priority"] = None
 else:
     st.info("샘플 데이터로 미리보기 중입니다. 실제 편성 전 CSV를 업로드하세요.")
     df_teachers = pd.DataFrame({
         "name": [f"교사{i:02d}" for i in range(1, 41)],
         "exclude": [""] * 40,
+        "priority": [None] * 40,
     })
 
 st.dataframe(df_teachers, use_container_width=True)
@@ -187,32 +197,57 @@ for _, row in df_teachers.iterrows():
             exclude_class[name].add((gc[0], gc[1]))
 
 # -----------------------------
-# 배정 알고리즘 (순번 고정 · 라운드로빈)
+# 배정 알고리즘 (순번 고정 · 라운드로빈 + 우선순위 기반 균등할당)
 # -----------------------------
 teachers = df_teachers["name"].tolist()
 if len(teachers) == 0:
     st.error("교사 명단이 비어 있습니다.")
     st.stop()
 
-# 학급 단위 2인 배정: (정감독, 부감독)
-# 원칙: 같은 교시에는 한 교사가 한 교실만 맡음(옵션으로 완화 가능), exclude(시간/반/시간+반) 준수, 순번 고정
+# 우선순위 정렬: priority가 낮을수록 우선, 미입력(None/NaN)은 가장 낮은 우선으로 간주
+_df = df_teachers.copy()
+_df["_order"] = range(len(_df))
+_df["priority_num"] = pd.to_numeric(_df.get("priority"), errors="coerce")
+_df["priority_num"].fillna(1e9, inplace=True)
+_df.sort_values(["priority_num", "_order"], inplace=True)
+teacher_order = _df["name"].tolist()
+
+# 전체 필요 자리 수(학급×2) 계산 → 균등할당 + 남는 몫을 우선순위 순으로 배분
+total_needed = 0
+for (d, p) in slots:
+    active_grades = [g for g in range(1, num_grades + 1) if int(periods_by_day_by_grade[d - 1][g - 1]) >= p]
+    total_needed += len(active_grades) * classes_per_grade * 2
+
+N = len(teacher_order)
+base = total_needed // max(N,1)
+rem = total_needed - base * N
+remaining_quota = {t: base for t in teacher_order}
+for t in teacher_order:
+    if rem <= 0:
+        break
+    remaining_quota[t] += 1
+    rem -= 1
+
+# 제외 파싱 사전은 위에서 구성됨: exclude_time, exclude_class, exclude_time_class
+
 classroom_assignments = dict()  # (d,p) -> dict[(g,c)] = (chief, assistant)
-class_cursor = 0
-N = len(teachers)
+class_cursor = 0  # teacher_order 순환 커서
 
 for (d, p) in slots:
     active_grades = [g for g in range(1, num_grades + 1) if int(periods_by_day_by_grade[d - 1][g - 1]) >= p]
-    slot_taken = set()  # 이 교시에 이미 배정된 교사 (중복 방지)
+    slot_taken = set()  # 같은 교시 중복 방지 (옵션으로 완화)
     per_slot = {}
     for g in active_grades:
         for c in range(1, classes_per_grade + 1):
             pair = []
             checked = 0
-            # 1차: 기본 규칙 하에서 선발
-            while len(pair) < 2 and checked < N * 6:
-                t = teachers[class_cursor % N]
+            # 두 명(정/부) 선발 — 남은 할당량(remaining_quota)>0인 교사 우선
+            while len(pair) < 2 and checked < N * 8:
+                t = teacher_order[class_cursor % N]
                 class_cursor += 1
                 checked += 1
+                if remaining_quota.get(t,0) <= 0:
+                    continue
                 if (d, p) in exclude_time.get(t, set()):
                     continue
                 if (g, c) in exclude_class.get(t, set()):
@@ -225,34 +260,28 @@ for (d, p) in slots:
                     continue
                 pair.append(t)
                 slot_taken.add(t)
-            # 2차: 미배정 백필(옵션에 따라 제약 완화)
+                remaining_quota[t] -= 1
+            # 2차 백필: 할당량 0이더라도 빈칸 메우기 시도 (옵션 반영)
             refill_checked = 0
-            while len(pair) < 2 and refill_checked < N * 6:
-                t = teachers[class_cursor % N]
+            while len(pair) < 2 and refill_checked < N * 8:
+                t = teacher_order[class_cursor % N]
                 class_cursor += 1
                 refill_checked += 1
-                if (d, p) in exclude_time.get(t, set()):
+                if (d, p) in exclude_time.get(t, set()) or (g, c) in exclude_class.get(t, set()) or (d, p, g, c) in exclude_time_class.get(t, set()):
                     continue
-                if (g, c) in exclude_class.get(t, set()):
-                    continue
-                if (d, p, g, c) in exclude_time_class.get(t, set()):
-                    continue
-                # 백필 단계에서는 allow_multi_classes/allow_same_person_both_roles 옵션을 반영하여 완화
-                if (not allow_same_person_both_roles) and (len(pair) == 1 and t == pair[0]):
-                    # 같은 반에서 정/부를 같은 교사가 겸임 금지 시
-                    # 단, 다른 교실에서 이미 맡았더라도 allow_multi_classes가 True면 허용
+                if (not allow_same_person_both_roles) and (len(pair)==1 and t==pair[0]):
                     if (not allow_multi_classes) and (t in slot_taken):
                         continue
-                # 겸임 허용이면 같은 사람 두 번도 허용
                 pair.append(t)
                 slot_taken.add(t)
+                # refill 단계에서는 quota 차감하지 않음 (이미 0일 수 있음)
             chief = pair[0] if len(pair) > 0 else "(미배정)"
             assistant = pair[1] if len(pair) > 1 else "(미배정)"
             per_slot[(g, c)] = (chief, assistant)
     classroom_assignments[(d, p)] = per_slot
 
 # -----------------------------
-# 3) 일자별 시험 시간표 (시각화) — ✍️ 수기 편집 가능
+# 3) 일자별 시험 시간표 (시각화) — ✍️ 수기 편집 가능 (시각화) — ✍️ 수기 편집 가능
 # -----------------------------
 st.markdown("---")
 st.subheader("3) 일자별 시험 시간표 (시각화 · 편집 가능)")

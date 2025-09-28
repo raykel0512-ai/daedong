@@ -31,6 +31,11 @@ classes_per_grade = st.sidebar.number_input("학년별 학급 수(동일)", min_
 
 # 하루·학년별 교시 수
 st.sidebar.subheader("하루별·학년별 교시 수 설정")
+
+# 부족 인원 대응 옵션
+st.sidebar.subheader("부족 인원 대응 옵션")
+allow_multi_classes = st.sidebar.checkbox("같은 교시 여러 교실 담당 허용(중복 배정)", value=False, help="교사가 한 교시 동안 여러 반을 맡을 수 있도록 허용합니다.")
+allow_same_person_both_roles = st.sidebar.checkbox("한 반에서 정·부감독을 같은 교사가 겸임 허용", value=False, help="인원이 매우 부족할 때만 권장합니다.")
 # periods_by_day_by_grade[d][g] = d일차 g학년 교시 수
 periods_by_day_by_grade = []
 for d in range(1, num_days + 1):
@@ -189,13 +194,12 @@ if len(teachers) == 0:
     st.stop()
 
 # 학급 단위 2인 배정: (정감독, 부감독)
-# 원칙: 같은 교시에는 한 교사가 한 교실만 맡음, exclude(시간/반/시간+반) 준수, 순번 고정
+# 원칙: 같은 교시에는 한 교사가 한 교실만 맡음(옵션으로 완화 가능), exclude(시간/반/시간+반) 준수, 순번 고정
 classroom_assignments = dict()  # (d,p) -> dict[(g,c)] = (chief, assistant)
 class_cursor = 0
 N = len(teachers)
 
 for (d, p) in slots:
-    # 해당 교시에 시험이 있는 학년만 활성
     active_grades = [g for g in range(1, num_grades + 1) if int(periods_by_day_by_grade[d - 1][g - 1]) >= p]
     slot_taken = set()  # 이 교시에 이미 배정된 교사 (중복 방지)
     per_slot = {}
@@ -203,22 +207,42 @@ for (d, p) in slots:
         for c in range(1, classes_per_grade + 1):
             pair = []
             checked = 0
-            # 두 명(정/부) 뽑기
+            # 1차: 기본 규칙 하에서 선발
             while len(pair) < 2 and checked < N * 6:
                 t = teachers[class_cursor % N]
                 class_cursor += 1
                 checked += 1
-                # 제외 규칙 검사
                 if (d, p) in exclude_time.get(t, set()):
                     continue
                 if (g, c) in exclude_class.get(t, set()):
                     continue
                 if (d, p, g, c) in exclude_time_class.get(t, set()):
                     continue
-                if t in slot_taken:
+                if (not allow_multi_classes) and (t in slot_taken):
                     continue
-                if t in pair:
+                if (not allow_same_person_both_roles) and (t in pair):
                     continue
+                pair.append(t)
+                slot_taken.add(t)
+            # 2차: 미배정 백필(옵션에 따라 제약 완화)
+            refill_checked = 0
+            while len(pair) < 2 and refill_checked < N * 6:
+                t = teachers[class_cursor % N]
+                class_cursor += 1
+                refill_checked += 1
+                if (d, p) in exclude_time.get(t, set()):
+                    continue
+                if (g, c) in exclude_class.get(t, set()):
+                    continue
+                if (d, p, g, c) in exclude_time_class.get(t, set()):
+                    continue
+                # 백필 단계에서는 allow_multi_classes/allow_same_person_both_roles 옵션을 반영하여 완화
+                if (not allow_same_person_both_roles) and (len(pair) == 1 and t == pair[0]):
+                    # 같은 반에서 정/부를 같은 교사가 겸임 금지 시
+                    # 단, 다른 교실에서 이미 맡았더라도 allow_multi_classes가 True면 허용
+                    if (not allow_multi_classes) and (t in slot_taken):
+                        continue
+                # 겸임 허용이면 같은 사람 두 번도 허용
                 pair.append(t)
                 slot_taken.add(t)
             chief = pair[0] if len(pair) > 0 else "(미배정)"

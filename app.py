@@ -29,6 +29,12 @@ num_grades = st.sidebar.number_input("학년 수", min_value=1, max_value=6, val
 classes_per_grade = st.sidebar.number_input("학년별 학급 수(동일)", min_value=1, max_value=20, value=8, step=1)
 
 auto_fill_classes = st.sidebar.checkbox("학급별 자동 채우기(교실 단위 감독)", value=True, help="일자·교시별로 활성 학년의 모든 반에 감독 교사를 1명씩 자동 배정합니다.")
+visualization_mode = st.sidebar.selectbox(
+    "시각화 모드",
+    options=["분산(반별 배포)", "요약동기화(첫 반에 모아 표기)"],
+    index=0,
+    help="분산: 교사들을 반별로 순서대로 채움 / 요약동기화: 해당 교시의 proctor 목록을 첫 학년 1반 칸에 합쳐서 표기"
+)", value=True, help="일자·교시별로 활성 학년의 모든 반에 감독 교사를 1명씩 자동 배정합니다.")
 
 # 하루·학년별 교시 수
 st.sidebar.subheader("하루별·학년별 교시 수 설정")
@@ -179,7 +185,7 @@ for (d, p) in slots:
     assignments[label] = picked
 
 # 학급 단위 자동 채우기 (활성 학년×반 개수만큼 1인/교실)
-if auto_fill_classes:
+if auto_fill_classes and visualization_mode == "분산(반별 배포)":
     class_cursor = 0  # 학급 배정용 별도 커서
     for (d, p) in slots:
         active_grades = [g for g in range(1, num_grades + 1) if int(periods_by_day_by_grade[d - 1][g - 1]) >= p]
@@ -194,7 +200,6 @@ if auto_fill_classes:
                 continue
             if t in [name for (_, _, name) in class_picked]:
                 continue  # 같은 교시는 1인 1교실 원칙
-            # 다음 배정 교실 좌표 계산
             idx = len(class_picked)
             g_idx = idx // classes_per_grade
             c_idx = idx % classes_per_grade
@@ -289,9 +294,20 @@ if num_days > 0:
                 st.markdown(f"**{g}학년 (교시수: {p_cnt})**")
                 cols = [f"{g}-{c}" for c in range(1, classes_per_grade + 1)]
                 timetable_df = pd.DataFrame("", index=[f"P{p}" for p in range(1, p_cnt + 1)], columns=cols)
-                # 채우기: 해당 일의 각 교시에 대해 학급 배정 결과 반영
-                if auto_fill_classes:
-                    for p in range(1, p_cnt + 1):
+                # 채우기
+                for p in range(1, p_cnt + 1):
+                    slot_label = f"D{d_idx}P{p}"
+                    if visualization_mode == "요약동기화(첫 반에 모아 표기)":
+                        proctors = []
+                        day_rows_tmp = edited[edited["slot"] == slot_label]
+                        if not day_rows_tmp.empty:
+                            for col in [c for c in edited.columns if c.startswith("proctor_")]:
+                                val = day_rows_tmp.iloc[0][col]
+                                if isinstance(val, str) and val and val != "(미배정)":
+                                    proctors.append(val)
+                        if proctors:
+                            timetable_df.loc[f"P{p}", f"{g}-1"] = ", ".join(proctors)
+                    else:
                         class_list = classroom_assignments.get((d_idx, p), [])
                         for (gg, cc, tname) in class_list:
                             if gg == g:

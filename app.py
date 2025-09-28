@@ -5,20 +5,20 @@ import random
 from collections import defaultdict
 from datetime import datetime
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="시험 시감 자동 편성", layout="wide")
 
 st.title("🧮 시험 시감 자동 편성 프로그램")
-st.caption("4일간(일수 가변) · **하루별 교시 수를 각각 다르게 설정 가능** · 교사 ~50명 기준 · 가용/제외시간 반영 · **순번 고정 배정** · 수작업 편집·다운로드 가능")
+st.caption("4일간(일수 가변) · 하루별 교시 수를 각각 다르게 설정 가능 · 교사 ~50명 기준 · 가용/제외시간 반영 · **순번 고정 배정** · 수작업 편집·다운로드 가능")
 
 # -----------------------------
 # Sidebar: 기본 설정
 # -----------------------------
 st.sidebar.header("기본 설정")
 num_days = st.sidebar.number_input("시험 일수(일)", min_value=1, max_value=10, value=4)
+
 st.sidebar.subheader("하루별 교시 수 설정")
 periods_by_day = []
 for d in range(1, num_days+1):
@@ -27,7 +27,6 @@ for d in range(1, num_days+1):
     )
 
 proctors_per_slot = st.sidebar.number_input("슬롯당 필요한 감독 교사 수", min_value=1, max_value=30, value=2, help="한 교시(슬롯)마다 필요한 시감 교사 수")
-# 순번 고정 모드: 시드/랜덤 사용 안 함
 
 st.sidebar.markdown("---")
 
@@ -36,7 +35,7 @@ st.sidebar.markdown("---")
 # -----------------------------
 st.subheader("1) 교사 명단 업로드")
 st.write(
-    "CSV 파일을 업로드하세요. 최소 열: `name`. 선택 열: `exclude` (예: `D1P2; D3P3`), `weight` (배정 가중치, 기본 1)."
+    "CSV 파일을 업로드하세요. 최소 열: `name`. 선택 열: `exclude` (예: `D1P2; D3P3`)."
 )
 
 col_tmpl1, col_tmpl2 = st.columns([1,1])
@@ -45,13 +44,12 @@ with col_tmpl1:
         sample = pd.DataFrame({
             "name": [f"교사{i:02d}" for i in range(1, 11)],
             "exclude": ["", "D1P2", "D2P2;D3P1", "", "D1P1;D4P2", "", "D3P2", "", "", "D2P1"],
-            "weight": [1,1,1,1,1,1,1,1,1,1],
         })
         st.download_button("sample_teachers.csv 저장", data=sample.to_csv(index=False).encode("utf-8-sig"), file_name="sample_teachers.csv", mime="text/csv")
 
 with col_tmpl2:
     if st.button("빈 템플릿 내려받기"):
-        empty = pd.DataFrame({"name": [], "exclude": [], "weight": []})
+        empty = pd.DataFrame({"name": [], "exclude": []})
         st.download_button("teachers_template.csv 저장", data=empty.to_csv(index=False).encode("utf-8-sig"), file_name="teachers_template.csv", mime="text/csv")
 
 uploaded = st.file_uploader("교사 명단 CSV 업로드", type=["csv"]) 
@@ -67,15 +65,11 @@ if uploaded is not None:
         st.stop()
     if "exclude" not in df_teachers.columns:
         df_teachers["exclude"] = ""
-    if "weight" not in df_teachers.columns:
-        df_teachers["weight"] = 1
-    df_teachers["weight"] = pd.to_numeric(df_teachers["weight"], errors="coerce").fillna(1).clip(lower=0.1)
 else:
     st.info("샘플 데이터로 미리보기 중입니다. 실제 편성 전 CSV를 업로드하세요.")
     df_teachers = pd.DataFrame({
         "name": [f"교사{i:02d}" for i in range(1, 21)],
         "exclude": ["", "D1P2", "D2P2;D3P1", "", "D1P1;D4P2", "", "D3P2", "", "", "D2P1", "", "", "D1P1", "", "D4P2", "", "", "D3P1", "", ""],
-        "weight": [1]*20,
     })
 
 st.dataframe(df_teachers, use_container_width=True)
@@ -102,7 +96,6 @@ for _, row in df_teachers.iterrows():
         for tok in [t.strip() for t in excl_raw.split(";") if t.strip()]:
             if tok.upper().startswith("D") and "P" in tok.upper():
                 try:
-                    # Normalize e.g., D1P2
                     upper = tok.upper().replace(" ", "")
                     d_idx = upper.find("D")
                     p_idx = upper.find("P")
@@ -115,11 +108,7 @@ for _, row in df_teachers.iterrows():
 
 # -----------------------------
 # 배정 알고리즘 (순번 고정 · 라운드로빈)
-# 목표:
-#  - 각 슬롯당 proctors_per_slot 명 배정
-#  - 개인 제외 시간 준수
-#  - 업로드된 교사 순서를 그대로 따라 순번 배정 (랜덤/가중치 미사용)
-
+# -----------------------------
 teachers = df_teachers["name"].tolist()
 assignments = defaultdict(list)  # slot_label -> [names]
 load = defaultdict(int)  # name -> assigned count
@@ -128,19 +117,17 @@ if len(teachers) == 0:
     st.error("교사 명단이 비어 있습니다.")
     st.stop()
 
-# 순번 커서 (다음 배정 시작 위치)
 cursor = 0
 N = len(teachers)
 
 for (d, p) in slots:
     label = f"D{d}P{p}"
     picked = []
-    checked = 0  # 무한루프 방지
+    checked = 0
     while len(picked) < proctors_per_slot and checked < N * 2:
         t = teachers[cursor % N]
         cursor += 1
         checked += 1
-        # 제외 시간/중복 체크
         if (d, p) in teacher_exclude.get(t, set()):
             continue
         if t in picked:
@@ -155,14 +142,12 @@ for (d, p) in slots:
     label = f"D{d}P{p}"
     row = {"slot": label}
     people = assignments[label]
-    # 고정 컬럼 수(최대 proctors_per_slot)에 맞춰 채우기
     for i in range(proctors_per_slot):
         row[f"proctor_{i+1}"] = people[i] if i < len(people) else "(미배정)"
     rows.append(row)
 
 schedule_df = pd.DataFrame(rows)
 
-# 미배정 경고
 unfilled = (schedule_df == "(미배정)").sum().sum()
 if unfilled > 0:
     st.warning(f"일부 슬롯에 미배정 인원이 있습니다: {unfilled} 자리. '슬롯당 필요한 인원 수'를 줄이거나 제외 조건을 완화해 주세요.")
@@ -179,15 +164,12 @@ edited = st.data_editor(
 
 st.markdown("---")
 st.subheader("4) 배정 통계 & 검증")
-# 현재 편집 상태 기준으로 카운트 재계산
 assigned_names = []
 for c in [c for c in edited.columns if c.startswith("proctor_")]:
     assigned_names += [v for v in edited[c].tolist() if isinstance(v, str) and v and v != "(미배정)"]
 
 counts = pd.Series(assigned_names).value_counts().rename_axis("name").reset_index(name="assigned_count")
-# 모든 교사 포함되도록 병합
 all_counts = pd.DataFrame({"name": teachers}).merge(counts, how="left", on="name").fillna({"assigned_count": 0})
-# 이상 배정 수(이론치): 총 필요 인원 / 교사 수
 ideal_per_teacher = round((len(slots) * proctors_per_slot) / max(len(teachers), 1), 2)
 all_counts["ideal"] = ideal_per_teacher
 all_counts = all_counts.sort_values("assigned_count", ascending=False)
@@ -222,11 +204,7 @@ st.download_button("CSV로 다운로드", data=edited.to_csv(index=False).encode
 st.markdown("""
 ---
 ### 사용 팁
-- `weight`를 이용해 특정 교사를 조금 더/덜 배정할 수 있습니다. (예: 담임, 업무 담당자 등 고려)
 - 배정 후 표에서 직접 이름을 바꿔 수작업 조정 가능합니다.
 - 제외 입력 예시: `D1P2; D3P1` → 1일 2교시, 3일 1교시 배정 제외.
-- 좌측 사이드바의 시드를 바꾸면 다른 공정 분배 결과를 얻을 수 있습니다.
 - 필요 인원이 너무 많아 미배정이 생기면: (1) 슬롯당 인원 수를 줄이거나, (2) 제외를 완화하거나, (3) 교사 수를 늘려주세요.
-"""
-)
-
+""")

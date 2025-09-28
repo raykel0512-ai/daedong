@@ -28,13 +28,18 @@ st.sidebar.subheader("학년/학급 구성")
 num_grades = st.sidebar.number_input("학년 수", min_value=1, max_value=6, value=3, step=1)
 classes_per_grade = st.sidebar.number_input("학년별 학급 수(동일)", min_value=1, max_value=20, value=8, step=1)
 
-auto_fill_classes = st.sidebar.checkbox("학급별 자동 채우기(교실 단위 감독)", value=True, help="일자·교시별로 활성 학년의 모든 반에 감독 교사를 1명씩 자동 배정합니다.")
+auto_fill_classes = st.sidebar.checkbox(
+    "학급별 자동 채우기(교실 단위 감독)",
+    value=True,
+    help="일자·교시별로 활성 학년의 모든 반에 감독 교사를 1명씩 자동 배정합니다."
+)
+
 visualization_mode = st.sidebar.selectbox(
     "시각화 모드",
     options=["분산(반별 배포)", "요약동기화(첫 반에 모아 표기)"],
     index=0,
     help="분산: 교사들을 반별로 순서대로 채움 / 요약동기화: 해당 교시의 proctor 목록을 첫 학년 1반 칸에 합쳐서 표기"
-)", value=True, help="일자·교시별로 활성 학년의 모든 반에 감독 교사를 1명씩 자동 배정합니다.")
+)
 
 # 하루·학년별 교시 수
 st.sidebar.subheader("하루별·학년별 교시 수 설정")

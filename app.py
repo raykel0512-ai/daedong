@@ -1,5 +1,5 @@
 # streamlit run app.py
-# 시험 시감 자동 편성 (순번 고정 / 학년별-일자별 교시 수 / 슬롯당 인원 / 제외 반영 / 편집·다운로드 / 시각화)
+# 시험 시감 자동 편성 (순번 고정 / 학년·일자별 교시 / 슬롯당 인원 / 제외 반영 / 편집·다운로드 / 시각화 자동 채우기)
 
 from collections import defaultdict
 from datetime import datetime
@@ -12,7 +12,7 @@ st.set_page_config(page_title="시험 시감 자동 편성", layout="wide")
 st.title("🧮 시험 시감 자동 편성 프로그램")
 st.caption(
     "일수 가변 · **하루별/학년별 교시 수 각각 설정 가능** · 교사 ~50명 기준 · "
-    "가용/제외시간 반영 · **순번 고정 배정** · 수작업 편집·다운로드 가능"
+    "가용/제외시간 반영 · **순번 고정 배정** · 수작업 편집·다운로드 가능 · **학급 시간표 자동 채우기**"
 )
 
 # -----------------------------
@@ -27,6 +27,8 @@ num_days = st.sidebar.number_input("시험 일수(일)", min_value=1, max_value=
 st.sidebar.subheader("학년/학급 구성")
 num_grades = st.sidebar.number_input("학년 수", min_value=1, max_value=6, value=3, step=1)
 classes_per_grade = st.sidebar.number_input("학년별 학급 수(동일)", min_value=1, max_value=20, value=8, step=1)
+
+auto_fill_classes = st.sidebar.checkbox("학급별 자동 채우기(교실 단위 감독)", value=True, help="일자·교시별로 활성 학년의 모든 반에 감독 교사를 1명씩 자동 배정합니다.")
 
 # 하루·학년별 교시 수
 st.sidebar.subheader("하루별·학년별 교시 수 설정")
@@ -43,11 +45,11 @@ for d in range(1, num_days + 1):
             )
         periods_by_day_by_grade.append(per_grade)
 
-# 슬롯당 필요한 감독 교사 수 (기본 2명)
+# 슬롯당 필요한 감독 교사 수 (교시 단위 요약 표용)
 proctors_per_slot = st.sidebar.number_input(
-    "슬롯당 필요한 감독 교사 수",
-    min_value=1, max_value=30, value=2,
-    help="한 교시(슬롯)마다 필요한 시감 교사 수"
+    "슬롯당 필요한 감독 교사 수(요약표)",
+    min_value=1, max_value=100, value=2,
+    help="교시별 요약 표에 표시할 감독 인원 수입니다. 학급 자동 채우기는 이 값과 무관하게 교실 수에 맞춰 1명씩 배정합니다."
 )
 
 st.sidebar.markdown("---")
@@ -63,8 +65,8 @@ st.write(
 
 # 샘플/템플릿 다운로드
 sample_df = pd.DataFrame({
-    "name": [f"교사{i:02d}" for i in range(1, 11)],
-    "exclude": ["", "D1P2", "D2P2; D3P1", "", "D1P1; D4P2", "", "D3P2", "", "", "D2P1"],
+    "name": [f"교사{i:02d}" for i in range(1, 31)],
+    "exclude": [""] * 30,
 })
 col_s1, col_s2 = st.columns(2)
 with col_s1:
@@ -102,11 +104,8 @@ if uploaded is not None:
 else:
     st.info("샘플 데이터로 미리보기 중입니다. 실제 편성 전 CSV를 업로드하세요.")
     df_teachers = pd.DataFrame({
-        "name": [f"교사{i:02d}" for i in range(1, 21)],
-        "exclude": [
-            "", "D1P2", "D2P2; D3P1", "", "D1P1; D4P2", "", "D3P2", "", "", "D2P1",
-            "", "", "D1P1", "", "D4P2", "", "", "D3P1", "", ""
-        ],
+        "name": [f"교사{i:02d}" for i in range(1, 31)],
+        "exclude": [""] * 30,
     })
 
 st.dataframe(df_teachers, use_container_width=True)
@@ -151,13 +150,15 @@ for _, row in df_teachers.iterrows():
 # 배정 알고리즘 (순번 고정 · 라운드로빈)
 # -----------------------------
 teachers = df_teachers["name"].tolist()
-assignments = defaultdict(list)   # slot_label -> [names]
-load = defaultdict(int)          # name -> assigned count
+assignments = defaultdict(list)   # slot_label -> [names] (요약 표용, proctors_per_slot 명)
+classroom_assignments = dict()    # (d,p) -> list[(g,c,teacher)] (학급 자동 채우기용)
+load = defaultdict(int)          # name -> assigned count (요약용)
 
 if len(teachers) == 0:
     st.error("교사 명단이 비어 있습니다.")
     st.stop()
 
+# 교시 단위 요약 배정 (proctors_per_slot 명)
 cursor = 0
 N = len(teachers)
 
@@ -165,7 +166,7 @@ for (d, p) in slots:
     label = f"D{d}P{p}"
     picked = []
     checked = 0
-    while len(picked) < proctors_per_slot and checked < N * 2:
+    while len(picked) < proctors_per_slot and checked < N * 3:
         t = teachers[cursor % N]
         cursor += 1
         checked += 1
@@ -177,7 +178,31 @@ for (d, p) in slots:
         load[t] += 1
     assignments[label] = picked
 
-# 배정 결과 테이블
+# 학급 단위 자동 채우기 (활성 학년×반 개수만큼 1인/교실)
+if auto_fill_classes:
+    class_cursor = 0  # 학급 배정용 별도 커서
+    for (d, p) in slots:
+        active_grades = [g for g in range(1, num_grades + 1) if int(periods_by_day_by_grade[d - 1][g - 1]) >= p]
+        total_classes = len(active_grades) * classes_per_grade
+        class_picked = []
+        checked = 0
+        while len(class_picked) < total_classes and checked < N * 5:
+            t = teachers[class_cursor % N]
+            class_cursor += 1
+            checked += 1
+            if (d, p) in teacher_exclude.get(t, set()):
+                continue
+            if t in [name for (_, _, name) in class_picked]:
+                continue  # 같은 교시는 1인 1교실 원칙
+            # 다음 배정 교실 좌표 계산
+            idx = len(class_picked)
+            g_idx = idx // classes_per_grade
+            c_idx = idx % classes_per_grade
+            g = active_grades[g_idx] if g_idx < len(active_grades) else active_grades[-1]
+            class_picked.append((g, c_idx + 1, t))
+        classroom_assignments[(d, p)] = class_picked
+
+# 배정 결과 테이블 (요약)
 rows = []
 for (d, p) in slots:
     label = f"D{d}P{p}"
@@ -188,12 +213,12 @@ for (d, p) in slots:
     rows.append(row)
 schedule_df = pd.DataFrame(rows)
 
-# 미배정 경고
+# 미배정 경고 (요약표 기준)
 unfilled = (schedule_df == "(미배정)").sum().sum()
 if unfilled > 0:
     st.warning(
         f"일부 슬롯에 미배정 인원이 있습니다: {unfilled} 자리. "
-        f"'슬롯당 필요한 인원 수'를 줄이거나 제외 조건을 완화해 주세요."
+        f"'슬롯당 필요한 인원 수(요약표)'를 줄이거나 제외 조건을 완화해 주세요."
     )
 
 st.markdown("---")
@@ -209,7 +234,7 @@ edited = st.data_editor(
 st.markdown("---")
 st.subheader("4) 배정 통계 & 검증")
 
-# 현재 편집 상태 기준 카운트
+# 현재 편집 상태 기준 카운트 (요약표)
 assigned_names = []
 for c in [c for c in edited.columns if c.startswith("proctor_")]:
     assigned_names += [v for v in edited[c].tolist() if isinstance(v, str) and v and v != "(미배정)"]
@@ -222,10 +247,10 @@ all_counts = all_counts.sort_values("assigned_count", ascending=False)
 
 c1, c2 = st.columns([1, 1])
 with c1:
-    st.write("교사별 배정 현황")
+    st.write("교사별 배정 현황 (요약표 기준)")
     st.dataframe(all_counts, use_container_width=True)
 with c2:
-    st.write("제외 조건 위반 여부 샘플 검사")
+    st.write("제외 조건 위반 여부 샘플 검사 (요약표)")
     violations = []
     slot_map = {row["slot"]: row for _, row in edited.iterrows()}
     for slot_label, row in slot_map.items():
@@ -262,11 +287,17 @@ if num_days > 0:
                 if p_cnt <= 0:
                     continue
                 st.markdown(f"**{g}학년 (교시수: {p_cnt})**")
-                # 열: g-1 ~ g-classes_per_grade 학급, 행: 1~p_cnt 교시
                 cols = [f"{g}-{c}" for c in range(1, classes_per_grade + 1)]
                 timetable_df = pd.DataFrame("", index=[f"P{p}" for p in range(1, p_cnt + 1)], columns=cols)
+                # 채우기: 해당 일의 각 교시에 대해 학급 배정 결과 반영
+                if auto_fill_classes:
+                    for p in range(1, p_cnt + 1):
+                        class_list = classroom_assignments.get((d_idx, p), [])
+                        for (gg, cc, tname) in class_list:
+                            if gg == g:
+                                timetable_df.loc[f"P{p}", f"{g}-{cc}"] = tname
                 st.dataframe(timetable_df, use_container_width=True)
-            st.markdown("**👥 감독 교사 배정 요약**")
+            st.markdown("**👥 감독 교사 배정 요약(교시 단위)**")
             day_rows = edited[edited["slot"].str.startswith(f"D{d_idx}P")]
             st.dataframe(day_rows.reset_index(drop=True), use_container_width=True)
 
@@ -286,6 +317,7 @@ st.markdown(
 ### 사용 팁
 - 교사 순서를 CSV의 `name` 열에서 원하는 순서로 정렬해 업로드하면, 그 순서대로 라운드로빈 배정됩니다.
 - 제외 입력 예시: `D1P2; D3P1` → 1일 2교시, 3일 1교시 배정 제외.
-- 필요 인원이 너무 많아 미배정이 생기면: (1) 슬롯당 인원 수를 줄이거나, (2) 제외를 완화하거나, (3) 교사 수를 늘려주세요.
+- 학급 자동 채우기: 각 교시에서 **활성 학년의 모든 반**(예: 총 24교실)에 **1명씩** 순번대로 배정합니다. (같은 교시 내 중복 배정 방지)
+- 필요 인원이 너무 많아 미배정이 생기면: (1) 교사 수를 늘리거나, (2) 제외를 조정하거나, (3) 일자/교시 구성을 조절하세요.
 """
 )

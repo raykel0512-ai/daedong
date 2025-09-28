@@ -19,14 +19,23 @@ st.caption("4일간(일수 가변) · 하루별 교시 수를 각각 다르게 �
 st.sidebar.header("기본 설정")
 num_days = st.sidebar.number_input("시험 일수(일)", min_value=1, max_value=10, value=4)
 
-st.sidebar.subheader("하루별 교시 수 설정")
-periods_by_day = []
-for d in range(1, num_days+1):
-    periods_by_day.append(
-        st.sidebar.number_input(f"{d}일차 교시 수", min_value=1, max_value=10, value=2, step=1, key=f"pbd_{d}")
-    )
+st.sidebar.subheader("학년/학급 구성")
+num_grades = st.sidebar.number_input("학년 수", min_value=1, max_value=6, value=3)
+classes_per_grade = st.sidebar.number_input("학년별 학급 수(동일)", min_value=1, max_value=20, value=8)
 
-proctors_per_slot = st.sidebar.number_input("슬롯당 필요한 감독 교사 수", min_value=1, max_value=30, value=2, help="한 교시(슬롯)마다 필요한 시감 교사 수")
+st.sidebar.subheader("하루별·학년별 교시 수 설정")
+# periods_by_day_by_grade[d][g] = d일차 g학년 교시 수
+periods_by_day_by_grade = []
+for d in range(1, num_days+1):
+    with st.sidebar.expander(f"{d}일차 교시 수", expanded=(d==1)):
+        per_grade = []
+        for g in range(1, num_grades+1):
+            per_grade.append(
+                st.number_input(f"{g}학년", min_value=0, max_value=10, value=2, step=1, key=f"pbdg_{d}_{g}")
+            )
+        periods_by_day_by_grade.append(per_grade)
+
+proctors_per_slot = st.sidebar.number_input("슬롯당 필요한 감독 교사 수", min_value=1, max_value=30, value=2, help="한 교시(슬롯)마다 필요한 시감 교사 수") st.sidebar.number_input("슬롯당 필요한 감독 교사 수", min_value=1, max_value=30, value=2, help="한 교시(슬롯)마다 필요한 시감 교사 수")
 
 st.sidebar.markdown("---")
 
@@ -79,7 +88,9 @@ st.dataframe(df_teachers, use_container_width=True)
 # -----------------------------
 slots = []  # (day, period) 튜플 리스트
 for d in range(1, num_days+1):
-    for p in range(1, int(periods_by_day[d-1])+1):
+    # 해당 일에 시험 있는 최대 교시(학년별 상이) ⇒ 감독은 최대 교시까지 필요하다고 가정
+    max_p = max([int(periods_by_day_by_grade[d-1][g-1]) for g in range(1, num_grades+1)] + [0])
+    for p in range(1, max_p+1):
         slots.append((d, p))
 
 slot_labels = [f"D{d}P{p}" for d,p in slots]
@@ -197,7 +208,34 @@ with c2:
         st.success("제외 시간 위반 없음 ✅")
 
 st.markdown("---")
-st.subheader("5) 결과 저장")
+
+# -----------------------------
+# 5) 일자별 시험 시간표(시각화) & 배정 요약
+# -----------------------------
+st.subheader("5) 일자별 시험 시간표(시각화)")
+
+if num_days > 0:
+    tabs = st.tabs([f"{d}일차" for d in range(1, num_days+1)])
+    for d_idx, tab in enumerate(tabs, start=1):
+        with tab:
+            st.markdown(f"#### 📚 {d_idx}일차 학년별 시간표")
+            for g in range(1, num_grades+1):
+                p_cnt = int(periods_by_day_by_grade[d_idx-1][g-1])
+                if p_cnt <= 0:
+                    continue
+                st.markdown(f"**{g}학년 (교시수: {p_cnt})**")
+                # 열: 1-{classes_per_grade} 학급, 행: 1-p_cnt 교시
+                cols = [f"{g}-{c}" for c in range(1, classes_per_grade+1)]
+                timetable_df = pd.DataFrame("", index=[f"P{p}" for p in range(1, p_cnt+1)], columns=cols)
+                st.dataframe(timetable_df, use_container_width=True)
+            st.markdown("**👥 감독 교사 배정 요약**")
+            # 해당 일의 슬롯만 필터링
+            day_rows = edited[edited["slot"].str.startswith(f"D{d_idx}P")]
+            st.dataframe(day_rows.reset_index(drop=True), use_container_width=True)
+
+st.markdown("---")
+
+st.subheader("6) 결과 저장")
 fn = st.text_input("파일명", value=f"exam_proctoring_{datetime.now().strftime('%Y%m%d_%H%M')}.csv")
 st.download_button("CSV로 다운로드", data=edited.to_csv(index=False).encode("utf-8-sig"), file_name=fn, mime="text/csv")
 

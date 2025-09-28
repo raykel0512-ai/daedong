@@ -2,8 +2,7 @@
 # 시험 시감 자동 편성 (순번 고정 / 학년·일자별 교시 / 학급 단위 2인 배정: 정·부감독 / 제외: 시간·반·시간+반 / 시각화 중심)
 
 from collections import defaultdict
-from datetime import datetime
-import re
+from datetime import datetime\nimport re\nfrom io import BytesIO
 
 import pandas as pd
 import streamlit as st
@@ -289,23 +288,33 @@ if num_days > 0:
 st.markdown("---")
 st.subheader("4) 배정 통계 & 검증")
 
-assign_list = []
+# 정/부 역할별 카운트
+counts_chief = defaultdict(int)
+counts_assistant = defaultdict(int)
 for (d, p), per_slot in classroom_assignments.items():
     for (g, c), (chief, assistant) in per_slot.items():
-        if chief and chief != "(미배정)":
-            assign_list.append(chief)
-        if assistant and assistant != "(미배정)":
-            assign_list.append(assistant)
+        if isinstance(chief, str) and chief and chief != "(미배정)":
+            counts_chief[chief] += 1
+        if isinstance(assistant, str) and assistant and assistant != "(미배정)":
+            counts_assistant[assistant] += 1
 
-if assign_list:
-    counts = pd.Series(assign_list).value_counts().rename_axis("name").reset_index(name="assigned_count")
-    total_needed = len(assign_list)
-    ideal = round(total_needed / max(len(df_teachers["name"].tolist()), 1), 2)
-    counts["ideal"] = ideal
-    st.dataframe(counts, use_container_width=True)
-else:
-    st.info("배정 결과가 없습니다. 설정을 확인하세요.")
+# 테이블 구성: name, chief_count, assistant_count, total, ideal
+all_names = sorted(set(list(df_teachers["name"])) | set(counts_chief.keys()) | set(counts_assistant.keys()))
+stat_rows = []
+for n in all_names:
+    ch = counts_chief.get(n, 0)
+    asn = counts_assistant.get(n, 0)
+    stat_rows.append({"name": n, "chief_count": ch, "assistant_count": asn, "total": ch + asn})
+stat_df = pd.DataFrame(stat_rows).sort_values(["total", "chief_count", "assistant_count"], ascending=False)
 
+# 이상치(참고용): 전체 배정 칸 수 / 교사 수
+total_assigned_slots = stat_df["total"].sum()
+ideal = round(total_assigned_slots / max(len(all_names), 1), 2)
+stat_df["ideal"] = ideal
+
+st.dataframe(stat_df, use_container_width=True)
+
+# 제외 위반 검사
 violations = []
 for (d, p), per_slot in classroom_assignments.items():
     for (g, c), (chief, assistant) in per_slot.items():
@@ -323,32 +332,64 @@ else:
 # 5) 결과 저장 (CSV)
 # -----------------------------
 st.markdown("---")
-st.subheader("5) 결과 저장")
+st.subheader("5) 결과 저장 (시각화 형식: Excel)")
 
-flat_rows = []
-for (d, p), per_slot in classroom_assignments.items():
-    for (g, c), (chief, assistant) in per_slot.items():
-        flat_rows.append({
-            "day": d, "period": p, "grade": g, "class": c,
-            "chief": chief, "assistant": assistant
-        })
-flat_df = pd.DataFrame(flat_rows)
+# Excel 통합 파일로 내보내기: 일자별 시각화(학년 표) + 통계 시트 + (옵션) 위반 시트
+excel_buf = BytesIO()
+with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
+    # 일자별 시트
+    for d in range(1, num_days + 1):
+        ws_name = f"D{d}"
+        start_row = 0
+        # 워크시트 객체 필요 시 포맷 적용 위해 보관
+        for g in range(1, num_grades + 1):
+            p_cnt = int(periods_by_day_by_grade[d - 1][g - 1])
+            if p_cnt <= 0:
+                continue
+            # 정/부 분리 행 구성
+            idx = []
+            for p in range(1, p_cnt + 1):
+                idx.append(f"P{p}-정")
+                idx.append(f"P{p}-부")
+            cols = [f"{g}-{c}" for c in range(1, classes_per_grade + 1)]
+            table = pd.DataFrame("", index=idx, columns=cols)
+            for p in range(1, p_cnt + 1):
+                per_slot = classroom_assignments.get((d, p), {})
+                for c in range(1, classes_per_grade + 1):
+                    chief, assistant = per_slot.get((g, c), ("", ""))
+                    if chief:
+                        table.loc[f"P{p}-정", f"{g}-{c}"] = chief
+                    if assistant:
+                        table.loc[f"P{p}-부", f"{g}-{c}"] = assistant
+            # 학년 제목 한 줄 쓰고 그 아래 테이블 이어붙이기
+            title_df = pd.DataFrame({f"{g}학년 (교시수:{p_cnt})": []})
+            title_df.to_excel(writer, sheet_name=ws_name, startrow=start_row, index=False)
+            start_row += 1
+            table.to_excel(writer, sheet_name=ws_name, startrow=start_row)
+            start_row += len(table) + 2  # 간격
+    # 통계 시트
+    stat_df.to_excel(writer, sheet_name="Statistics", index=False)
+    # 위반 시트 (있을 때만)
+    if violations:
+        pd.DataFrame(violations).to_excel(writer, sheet_name="Violations", index=False)
 
-fn = st.text_input("파일명", value=f"exam_proctoring_classes_{datetime.now().strftime('%Y%m%d_%H%M')}.csv")
+excel_value = excel_buf.getvalue()
+
+default_fn = f"exam_schedule_visual_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
 st.download_button(
-    "학급 배정 CSV 다운로드",
-    data=flat_df.to_csv(index=False).encode("utf-8-sig"),
-    file_name=fn,
-    mime="text/csv"
+    label="시각화 엑셀 다운로드 (.xlsx)",
+    data=excel_value,
+    file_name=default_fn,
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True,
 )
 
 st.markdown(
     """
 ---
 ### 사용 팁
-- 교사 순서를 CSV의 `name` 열에서 원하는 순서로 정렬해 업로드하면, 그 순서대로 라운드로빈 배정됩니다.
-- 제외 입력 예시: `D1P2`(시간), `1-3`(반), `D1P2@1-3`(시간+반). 세미콜론(;)으로 여러 개 입력 가능.
-- 학년별 교시 수가 다르면, 해당 일의 **시험이 있는 학년**만 시각화/배정에 포함됩니다.
-- 한 교시에는 동일 교사가 여러 교실에 배정되지 않도록 자동 방지됩니다.
+- 엑셀 파일은 **일자별 시트(D1, D2, …)** 로 나뉘고, 각 시트에는 **학년별 표(정/부 행 분리)**가 순서대로 배치됩니다.
+- `Statistics` 시트에서 **정감독/부감독/합계**를 따로 확인할 수 있습니다.
+- `Violations` 시트는 제외 조건 위반이 있을 때만 생성됩니다.
 """
 )

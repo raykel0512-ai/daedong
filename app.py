@@ -187,7 +187,9 @@ for c in [c for c in edited.columns if c.startswith("proctor_")]:
 counts = pd.Series(assigned_names).value_counts().rename_axis("name").reset_index(name="assigned_count")
 # 모든 교사 포함되도록 병합
 all_counts = pd.DataFrame({"name": teachers}).merge(counts, how="left", on="name").fillna({"assigned_count": 0})
-all_counts["ideal"] = all_counts["name"].map(lambda t: round(ideal[t], 2))
+# 이상 배정 수(이론치): 총 필요 인원 / 교사 수
+ideal_per_teacher = round((len(slots) * proctors_per_slot) / max(len(teachers), 1), 2)
+all_counts["ideal"] = ideal_per_teacher
 all_counts = all_counts.sort_values("assigned_count", ascending=False)
 
 c1, c2 = st.columns([1,1])
@@ -227,3 +229,4 @@ st.markdown("""
 - 필요 인원이 너무 많아 미배정이 생기면: (1) 슬롯당 인원 수를 줄이거나, (2) 제외를 완화하거나, (3) 교사 수를 늘려주세요.
 """
 )
+

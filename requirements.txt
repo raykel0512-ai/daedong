@@ -1,3 +1,5 @@
 streamlit
 pandas
 numpy
+ModuleNotFoundError: No module named 'xlsxwriter'
+

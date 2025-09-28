@@ -12,14 +12,20 @@ import streamlit as st
 st.set_page_config(page_title="시험 시감 자동 편성", layout="wide")
 
 st.title("🧮 시험 시감 자동 편성 프로그램")
-st.caption("4일간 2~3교시, 교사 ~50명 기준 · 가용/제외시간 반영 · **순번 고정 배정** · 수작업 편집·다운로드 가능")
+st.caption("4일간(일수 가변) · **하루별 교시 수를 각각 다르게 설정 가능** · 교사 ~50명 기준 · 가용/제외시간 반영 · **순번 고정 배정** · 수작업 편집·다운로드 가능")
 
 # -----------------------------
 # Sidebar: 기본 설정
 # -----------------------------
 st.sidebar.header("기본 설정")
 num_days = st.sidebar.number_input("시험 일수(일)", min_value=1, max_value=10, value=4)
-periods_per_day = st.sidebar.selectbox("하루 교시 수(2~3교시 중 선택)", options=[2, 3], index=0, help="일 단위로 시감이 진행되는 교시 수")
+st.sidebar.subheader("하루별 교시 수 설정")
+periods_by_day = []
+for d in range(1, num_days+1):
+    periods_by_day.append(
+        st.sidebar.number_input(f"{d}일차 교시 수", min_value=1, max_value=10, value=2, step=1, key=f"pbd_{d}")
+    )
+
 proctors_per_slot = st.sidebar.number_input("슬롯당 필요한 감독 교사 수", min_value=1, max_value=30, value=2, help="한 교시(슬롯)마다 필요한 시감 교사 수")
 # 순번 고정 모드: 시드/랜덤 사용 안 함
 
@@ -79,7 +85,7 @@ st.dataframe(df_teachers, use_container_width=True)
 # -----------------------------
 slots = []  # (day, period) 튜플 리스트
 for d in range(1, num_days+1):
-    for p in range(1, periods_per_day+1):
+    for p in range(1, int(periods_by_day[d-1])+1):
         slots.append((d, p))
 
 slot_labels = [f"D{d}P{p}" for d,p in slots]
@@ -221,4 +227,3 @@ st.markdown("""
 - 필요 인원이 너무 많아 미배정이 생기면: (1) 슬롯당 인원 수를 줄이거나, (2) 제외를 완화하거나, (3) 교사 수를 늘려주세요.
 """
 )
-

@@ -252,10 +252,14 @@ for (d, p) in slots:
     classroom_assignments[(d, p)] = per_slot
 
 # -----------------------------
-# 3) 일자별 시험 시간표 (시각화)
+# 3) 일자별 시험 시간표 (시각화) — ✍️ 수기 편집 가능
 # -----------------------------
 st.markdown("---")
-st.subheader("3) 일자별 시험 시간표 (시각화)")
+st.subheader("3) 일자별 시험 시간표 (시각화 · 편집 가능)")
+
+# 원본 생성 결과 → 편집본을 담을 컨테이너
+tables_original = {}
+tables_edited = {}
 
 if num_days > 0:
     tabs = st.tabs([f"{d}일차" for d in range(1, num_days + 1)])
@@ -267,25 +271,77 @@ if num_days > 0:
                 if p_cnt <= 0:
                     continue
                 cols = [f"{g}-{c}" for c in range(1, classes_per_grade + 1)]
-                # 행을 교시*2로 만들어 정/부를 분리 표기 (P1-정, P1-부, P2-정, P2-부 ...)
+                # 행을 교시*2로 만들어 정/부를 분리 표기 (P1-정, P1-부, ...)
                 idx = []
                 for p in range(1, p_cnt + 1):
                     idx.append(f"P{p}-정")
                     idx.append(f"P{p}-부")
                 table = pd.DataFrame("", index=idx, columns=cols)
                 for p in range(1, p_cnt + 1):
-                    per_slot = classroom_assignments.get((d_idx, p), {})
+                    per_slot = classroom_assignments_final.get((d_idx, p), {})
                     for c in range(1, classes_per_grade + 1):
                         chief, assistant = per_slot.get((g, c), ("", ""))
                         if chief:
                             table.loc[f"P{p}-정", f"{g}-{c}"] = chief
                         if assistant:
                             table.loc[f"P{p}-부", f"{g}-{c}"] = assistant
-                st.markdown(f"**{g}학년** (교시수: {p_cnt})")
-                st.dataframe(table, use_container_width=True)
+                tables_original[(d_idx, g)] = table.copy()
+                st.markdown(f"**{g}학년** (교시수: {p_cnt}) — 셀을 클릭해 교사명을 직접 수정/추가하세요")
+                tables_edited[(d_idx, g)] = st.data_editor(
+                    table,
+                    key=f"viz_{d_idx}_{g}",
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    hide_index=False,
+                )
+
+# 편집 결과를 반영하여 최종 배정으로 재구성
+classroom_assignments_final = {}
+for (d, p) in slots:
+    classroom_assignments_final[(d, p)] = {}
+
+for (d, g), ed in tables_edited.items():
+    # ed의 인덱스는 P#-정 / P#-부
+    for idx_label, row in ed.iterrows():
+        try:
+            p_str, role = idx_label.split("-")
+            p = int(p_str.replace("P", ""))
+        except Exception:
+            continue
+        for col, val in row.items():
+            if not isinstance(val, str):
+                continue
+            name = val.strip()
+            if name == "":
+                name = "(미배정)"
+            # 열은 g-반번호 형태
+            try:
+                g_str, c_str = col.split("-")
+                g_check = int(g_str)
+                c = int(c_str)
+            except Exception:
+                continue
+            if g_check != g:
+                continue
+            chief, assistant = classroom_assignments_final.get((d, p), {}).get((g, c), ("(미배정)", "(미배정)"))
+            if role == "정":
+                chief = name
+            else:
+                assistant = name
+            if (d, p) not in classroom_assignments_final:
+                classroom_assignments_final[(d, p)] = {}
+            classroom_assignments_final[(d, p)][(g, c)] = (chief, assistant)
+
+# 편집된 표가 없다면 원본 자동 배정 사용
+if not any(len(df) for df in tables_edited.values()):
+    classroom_assignments_final = classroom_assignments
+
+# 화면 안내
+st.info("시각화 표에서 수정한 내용이 아래 '배정 통계·검증'과 '결과 저장(엑셀)'에 그대로 반영됩니다. 신규 이름도 입력 가능!")
 
 # -----------------------------
-# 4) 배정 통계 & 검증 (옵션)
+# 4) 배정 통계 & 검증 (옵션) — 편집 반영
+# -----------------------------
 # -----------------------------
 st.markdown("---")
 st.subheader("4) 배정 통계 & 검증")
@@ -293,7 +349,7 @@ st.subheader("4) 배정 통계 & 검증")
 # 정/부 역할별 카운트
 counts_chief = defaultdict(int)
 counts_assistant = defaultdict(int)
-for (d, p), per_slot in classroom_assignments.items():
+for (d, p), per_slot in classroom_assignments_final.items():
     for (g, c), (chief, assistant) in per_slot.items():
         if isinstance(chief, str) and chief and chief != "(미배정)":
             counts_chief[chief] += 1
@@ -318,7 +374,7 @@ st.dataframe(stat_df, use_container_width=True)
 
 # 제외 위반 검사
 violations = []
-for (d, p), per_slot in classroom_assignments.items():
+for (d, p), per_slot in classroom_assignments_final.items():
     for (g, c), (chief, assistant) in per_slot.items():
         for role, t in [("chief", chief), ("assistant", assistant)]:
             if isinstance(t, str) and t and t != "(미배정)":
@@ -356,7 +412,7 @@ with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
             cols = [f"{g}-{c}" for c in range(1, classes_per_grade + 1)]
             table = pd.DataFrame("", index=idx, columns=cols)
             for p in range(1, p_cnt + 1):
-                per_slot = classroom_assignments.get((d, p), {})
+                per_slot = classroom_assignments_final.get((d, p), {})
                 for c in range(1, classes_per_grade + 1):
                     chief, assistant = per_slot.get((g, c), ("", ""))
                     if chief:

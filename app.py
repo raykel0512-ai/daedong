@@ -278,7 +278,7 @@ if num_days > 0:
                     idx.append(f"P{p}-부")
                 table = pd.DataFrame("", index=idx, columns=cols)
                 for p in range(1, p_cnt + 1):
-                    per_slot = classroom_assignments_final.get((d_idx, p), {})
+                    per_slot = classroom_assignments.get(((d_idx, p)), {})
                     for c in range(1, classes_per_grade + 1):
                         chief, assistant = per_slot.get((g, c), ("", ""))
                         if chief:

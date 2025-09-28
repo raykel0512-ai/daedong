@@ -12,7 +12,7 @@ import streamlit as st
 st.set_page_config(page_title="시험 시감 자동 편성", layout="wide")
 
 st.title("🧮 시험 시감 자동 편성 프로그램")
-st.caption("4일간 2~3교시, 교사 ~50명 기준 · 가용/제외시간 반영 · 수작업 편집·다운로드 가능")
+st.caption("4일간 2~3교시, 교사 ~50명 기준 · 가용/제외시간 반영 · **순번 고정 배정** · 수작업 편집·다운로드 가능")
 
 # -----------------------------
 # Sidebar: 기본 설정
@@ -20,10 +20,8 @@ st.caption("4일간 2~3교시, 교사 ~50명 기준 · 가용/제외시간 반�
 st.sidebar.header("기본 설정")
 num_days = st.sidebar.number_input("시험 일수(일)", min_value=1, max_value=10, value=4)
 periods_per_day = st.sidebar.selectbox("하루 교시 수(2~3교시 중 선택)", options=[2, 3], index=0, help="일 단위로 시감이 진행되는 교시 수")
-proctors_per_slot = st.sidebar.number_input("슬롯당 필요한 감독 교사 수", min_value=1, max_value=30, value=5, help="한 교시(슬롯)마다 필요한 시감 교사 수")
-seed = st.sidebar.number_input("무작위 시드(공정성/재현성)", min_value=0, max_value=10_000, value=42)
-random.seed(seed)
-np.random.seed(seed)
+proctors_per_slot = st.sidebar.number_input("슬롯당 필요한 감독 교사 수", min_value=1, max_value=30, value=2, help="한 교시(슬롯)마다 필요한 시감 교사 수")
+# 순번 고정 모드: 시드/랜덤 사용 안 함
 
 st.sidebar.markdown("---")
 
@@ -110,61 +108,39 @@ for _, row in df_teachers.iterrows():
     teacher_exclude[name] = exclusions
 
 # -----------------------------
-# 배정 알고리즘 (가벼운 탐욕/라운드로빈 + 페어네스)
-# -----------------------------
+# 배정 알고리즘 (순번 고정 · 라운드로빈)
 # 목표:
 #  - 각 슬롯당 proctors_per_slot 명 배정
 #  - 개인 제외 시간 준수
-#  - 전체 배정 수가 가중치에 비례하도록 분배(가중치=1이면 균등)
-#  - 최대한 공정하게 라운드 로빈
+#  - 업로드된 교사 순서를 그대로 따라 순번 배정 (랜덤/가중치 미사용)
 
 teachers = df_teachers["name"].tolist()
-weights = {row["name"]: float(row["weight"]) for _, row in df_teachers.iterrows()}
 assignments = defaultdict(list)  # slot_label -> [names]
 load = defaultdict(int)  # name -> assigned count
 
-# 목표 총 배정 수
-total_needed = len(slots) * proctors_per_slot
 if len(teachers) == 0:
     st.error("교사 명단이 비어 있습니다.")
     st.stop()
 
-# 각 교사 목표 배정 비율 (가중치 비례)
-weight_sum = sum(weights.values())
-ideal = {t: total_needed * (weights[t] / weight_sum) for t in teachers}
+# 순번 커서 (다음 배정 시작 위치)
+cursor = 0
+N = len(teachers)
 
-# 라운드 로빈 순서 섞기
-order = teachers.copy()
-random.shuffle(order)
-
-# 후보 선정을 위한 헬퍼
-
-def candidates_for_slot(d, p, already):
-    cands = []
-    for t in order:
-        if (d, p) in teacher_exclude.get(t, set()):
-            continue
-        if t in already:
-            continue
-        cands.append(t)
-    # 공정성 점수: (현재 배정/이상치) 낮은 순, 그리고 절대 배정 낮은 순
-    def fairness_key(t):
-        target = max(ideal[t], 1e-6)
-        return (load[t] / target, load[t])
-    cands.sort(key=fairness_key)
-    return cands
-
-# 실제 배정
 for (d, p) in slots:
     label = f"D{d}P{p}"
     picked = []
-    for _ in range(proctors_per_slot):
-        cands = candidates_for_slot(d, p, picked)
-        if not cands:
-            break
-        chosen = cands[0]
-        picked.append(chosen)
-        load[chosen] += 1
+    checked = 0  # 무한루프 방지
+    while len(picked) < proctors_per_slot and checked < N * 2:
+        t = teachers[cursor % N]
+        cursor += 1
+        checked += 1
+        # 제외 시간/중복 체크
+        if (d, p) in teacher_exclude.get(t, set()):
+            continue
+        if t in picked:
+            continue
+        picked.append(t)
+        load[t] += 1
     assignments[label] = picked
 
 # 배정 결과 테이블 생성
@@ -245,3 +221,4 @@ st.markdown("""
 - 필요 인원이 너무 많아 미배정이 생기면: (1) 슬롯당 인원 수를 줄이거나, (2) 제외를 완화하거나, (3) 교사 수를 늘려주세요.
 """
 )
+

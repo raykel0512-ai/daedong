@@ -574,8 +574,8 @@ with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
     # 통계 시트 (원하는 컬럼 순서로 저장)
 stat_df.to_excel(writer, sheet_name="Statistics", index=False)
     # 위반 시트 (있을 때만)
-    if violations:
-        pd.DataFrame(violations).to_excel(writer, sheet_name="Violations", index=False)
+if violations:
+    pd.DataFrame(violations).to_excel(writer, sheet_name="Violations", index=False)
 
 excel_value = excel_buf.getvalue()
 

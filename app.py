@@ -402,7 +402,10 @@ stat_rows = []
 for n in all_names:
     ch = counts_chief.get(n, 0)
     asn = counts_assistant.get(n, 0)
-    stat_rows.append({"name": n, "chief_count": ch, "assistant_count": asn, "total": ch + asn})
+    priority_val = None
+    if n in df_teachers.set_index("name").index:
+        priority_val = df_teachers.set_index("name").loc[n, "priority"]
+    stat_rows.append({"name": n, "chief_count": ch, "assistant_count": asn, "total": ch + asn, "priority": priority_val})
 stat_df = pd.DataFrame(stat_rows).sort_values(["total", "chief_count", "assistant_count"], ascending=False)
 
 # 이상치(참고용): 전체 배정 칸 수 / 교사 수
@@ -491,4 +494,3 @@ st.markdown(
 - `Violations` 시트는 제외 조건 위반이 있을 때만 생성됩니다.
 """
 )
-

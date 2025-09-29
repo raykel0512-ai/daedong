@@ -231,7 +231,9 @@ N = len(teacher_order)
 base = total_needed // max(N,1)
 rem = total_needed - base * N
 remaining_quota = {t: base for t in teacher_order}
-for t in teacher_order:
+# 남는 몫(rem)은 **우선순위가 낮은 사람(숫자가 큰 priority)**에게 먼저 배분 →
+# 우선순위가 높은 사람(숫자가 작은 priority)은 가능한 한 total이 낮아지도록 유지
+for t in reversed(teacher_order):
     if rem <= 0:
         break
     remaining_quota[t] += 1
@@ -489,3 +491,4 @@ st.markdown(
 - `Violations` 시트는 제외 조건 위반이 있을 때만 생성됩니다.
 """
 )
+

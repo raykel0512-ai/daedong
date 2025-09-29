@@ -274,7 +274,8 @@ classroom_assignments = dict()  # (d,p) -> dict[(g,c)] = (chief, assistant)
 running_total = defaultdict(int)
 
 # 우선순위/인덱스 맵
-prio_map_num = {r["name"]: float(r["priority"]) if pd.notnull(r["priority"]) else 1e9 for _, r in _df.iterrows()}
+# priority를 숫자로 안전 변환(이미 _df["priority_num"] 존재)
+prio_map_num = dict(zip(_df["name"].tolist(), _df["priority_num"].tolist()))
 orig_index = {name: i for i, name in enumerate(_df["name"].tolist())}
 
 def sorted_candidates(role: str, slot_taken: set):
@@ -507,25 +508,13 @@ st.dataframe(stat_df, use_container_width=True)
 
 # 제외 위반 검사
 violations = []
-
 for (d, p), per_slot in classroom_assignments_final.items():
     for (g, c), (chief, assistant) in per_slot.items():
         for role, t in [("chief", chief), ("assistant", assistant)]:
             if isinstance(t, str) and t and t != "(미배정)":
-                if (
-                    (d, p) in exclude_time.get(t, set())
-                    or (g, c) in exclude_class.get(t, set())
-                    or (d, p, g, c) in exclude_time_class.get(t, set())
-                ):
-                    violations.append({
-                        "day": d,
-                        "period": p,
-                        "grade": g,
-                        "class": c,
-                        "role": role,
-                        "name": t
-                    })
-
+                if (d, p) in exclude_time.get(t, set()) or (g, c) in exclude_class.get(t, set()) or (d, p, g, c) in exclude_time_class.get(t, set()):
+                    violations.append({"day": d, "period": p, "grade": g, "class": c, "role": role, "name": t})
+violations = []  # ensure variable exists above
 if violations:
     st.error("제외 시간/반 위반 건이 있습니다. 아래 목록을 확인해 수정하세요.")
     st.dataframe(pd.DataFrame(violations))
@@ -574,8 +563,8 @@ with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
     # 통계 시트 (원하는 컬럼 순서로 저장)
 stat_df.to_excel(writer, sheet_name="Statistics", index=False)
     # 위반 시트 (있을 때만)
-if violations:
-    pd.DataFrame(violations).to_excel(writer, sheet_name="Violations", index=False)
+    if violations:
+        pd.DataFrame(violations).to_excel(writer, sheet_name="Violations", index=False)
 
 excel_value = excel_buf.getvalue()
 
@@ -597,4 +586,3 @@ st.markdown(
 - `Violations` 시트는 제외 조건 위반이 있을 때만 생성됩니다.
 """
 )
-

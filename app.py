@@ -474,6 +474,7 @@ for (d, p), per_slot in classroom_assignments_final.items():
             if isinstance(t, str) and t and t != "(미배정)":
                 if (d, p) in exclude_time.get(t, set()) or (g, c) in exclude_class.get(t, set()) or (d, p, g, c) in exclude_time_class.get(t, set()):
                     violations.append({"day": d, "period": p, "grade": g, "class": c, "role": role, "name": t})
+violations = []  # ensure variable exists above
 if violations:
     st.error("제외 시간/반 위반 건이 있습니다. 아래 목록을 확인해 수정하세요.")
     st.dataframe(pd.DataFrame(violations))

@@ -206,43 +206,63 @@ for _, row in df_teachers.iterrows():
             exclude_class[name].add((gc[0], gc[1]))
 
 # -----------------------------
-# 배정 알고리즘 (순번 고정 · 라운드로빈 + 우선순위 기반 균등할당)
+# 배정 알고리즘 (우선순위 기반 균등할당 + 정감독 저우선(숫자 큼) 편중)
 # -----------------------------
 teachers = df_teachers["name"].tolist()
 if len(teachers) == 0:
     st.error("교사 명단이 비어 있습니다.")
     st.stop()
 
-# 우선순위 정렬: priority가 낮을수록 우선, 미입력(None/NaN)은 가장 낮은 우선으로 간주
+# 우선순위 정렬: priority가 낮은 숫자일수록 '우선이 높음', 큰 숫자일수록 '우선 낮음(더 많이 배정)'
 _df = df_teachers.copy()
 _df["_order"] = range(len(_df))
 _df["priority_num"] = pd.to_numeric(_df.get("priority"), errors="coerce")
 _df["priority_num"].fillna(1e9, inplace=True)
 _df.sort_values(["priority_num", "_order"], inplace=True)
-teacher_order = _df["name"].tolist()
+teacher_order = _df["name"].tolist()               # priority 오름차순 (우선 높은 → 낮은)
+teacher_order_rev = list(reversed(teacher_order))   # priority 내림차순 (우선 낮은 → 높은)
 
-# 전체 필요 자리 수(학급×2) 계산 → 균등할당 + 남는 몫을 우선순위 순으로 배분
-total_needed = 0
+# 전체 필요 자리 수 계산
+# 각 활성 (일,교시)마다 활성 학년 수 × 반수 × 2(정/부)
+rooms_total = 0
 for (d, p) in slots:
     active_grades = [g for g in range(1, num_grades + 1) if int(periods_by_day_by_grade[d - 1][g - 1]) >= p]
-    total_needed += len(active_grades) * classes_per_grade * 2
+    rooms_total += len(active_grades) * classes_per_grade
+chief_needed = rooms_total           # 정감독 총 필요 수
+assistant_needed = rooms_total       # 부감독 총 필요 수
 
-N = len(teacher_order)
-base = total_needed // max(N,1)
-rem = total_needed - base * N
-remaining_quota = {t: base for t in teacher_order}
-# 남는 몫(rem)은 **우선순위가 낮은 사람(숫자가 큰 priority)**에게 먼저 배분 →
-# 우선순위가 높은 사람(숫자가 작은 priority)은 가능한 한 total이 낮아지도록 유지
-for t in reversed(teacher_order):
-    if rem <= 0:
+N = max(len(teacher_order), 1)
+
+# 정/부 별 균등 몫 + 잔여 분배: 잔여는 '우선 낮은(숫자 큰)' 교사에게 먼저 → 저우선일수록 더 많이
+chief_base = chief_needed // N
+chief_rem = chief_needed - chief_base * N
+chief_quota = {t: chief_base for t in teacher_order}
+for t in teacher_order_rev:
+    if chief_rem <= 0:
         break
-    remaining_quota[t] += 1
-    rem -= 1
+    chief_quota[t] += 1
+    chief_rem -= 1
 
-# 제외 파싱 사전은 위에서 구성됨: exclude_time, exclude_class, exclude_time_class
+assistant_base = assistant_needed // N
+assistant_rem = assistant_needed - assistant_base * N
+assistant_quota = {t: assistant_base for t in teacher_order}
+for t in teacher_order_rev:
+    if assistant_rem <= 0:
+        break
+    assistant_quota[t] += 1
+    assistant_rem -= 1
 
+# 배정 본 실행
 classroom_assignments = dict()  # (d,p) -> dict[(g,c)] = (chief, assistant)
-class_cursor = 0  # teacher_order 순환 커서
+
+def can_use(t, d, p, g, c):
+    if (d, p) in exclude_time.get(t, set()):
+        return False
+    if (g, c) in exclude_class.get(t, set()):
+        return False
+    if (d, p, g, c) in exclude_time_class.get(t, set()):
+        return False
+    return True
 
 for (d, p) in slots:
     active_grades = [g for g in range(1, num_grades + 1) if int(periods_by_day_by_grade[d - 1][g - 1]) >= p]
@@ -250,49 +270,66 @@ for (d, p) in slots:
     per_slot = {}
     for g in active_grades:
         for c in range(1, classes_per_grade + 1):
-            pair = []
-            checked = 0
-            # 두 명(정/부) 선발 — 남은 할당량(remaining_quota)>0인 교사 우선
-            while len(pair) < 2 and checked < N * 8:
-                t = teacher_order[class_cursor % N]
-                class_cursor += 1
-                checked += 1
-                if remaining_quota.get(t,0) <= 0:
+            chief, assistant = "(미배정)", "(미배정)"
+            # 1) 정감독: 저우선(teacher_order_rev)부터 quota>0인 사람 우선
+            for t in teacher_order_rev:
+                if chief != "(미배정)":
+                    break
+                if chief_quota.get(t, 0) <= 0:
                     continue
-                if (d, p) in exclude_time.get(t, set()):
-                    continue
-                if (g, c) in exclude_class.get(t, set()):
-                    continue
-                if (d, p, g, c) in exclude_time_class.get(t, set()):
+                if not can_use(t, d, p, g, c):
                     continue
                 if (not allow_multi_classes) and (t in slot_taken):
                     continue
-                if (not allow_same_person_both_roles) and (t in pair):
-                    continue
-                pair.append(t)
+                chief = t
                 slot_taken.add(t)
-                remaining_quota[t] -= 1
-            # 2차 백필: 할당량 0이더라도 빈칸 메우기 시도 (옵션 반영)
-            refill_checked = 0
-            while len(pair) < 2 and refill_checked < N * 8:
-                t = teacher_order[class_cursor % N]
-                class_cursor += 1
-                refill_checked += 1
-                if (d, p) in exclude_time.get(t, set()) or (g, c) in exclude_class.get(t, set()) or (d, p, g, c) in exclude_time_class.get(t, set()):
-                    continue
-                if (not allow_same_person_both_roles) and (len(pair)==1 and t==pair[0]):
+                chief_quota[t] -= 1
+            # 리필(정): quota 상관없이 저우선부터
+            if chief == "(미배정)":
+                for t in teacher_order_rev:
+                    if chief != "(미배정)":
+                        break
+                    if not can_use(t, d, p, g, c):
+                        continue
                     if (not allow_multi_classes) and (t in slot_taken):
                         continue
-                pair.append(t)
+                    chief = t
+                    slot_taken.add(t)
+                    # quota 미차감
+            # 2) 부감독: 기본은 저우선 우선 (total도 저우선이 많아지도록)
+            for t in teacher_order_rev:
+                if assistant != "(미배정)":
+                    break
+                if assistant_quota.get(t, 0) <= 0:
+                    continue
+                if not can_use(t, d, p, g, c):
+                    continue
+                if (not allow_same_person_both_roles) and (t == chief):
+                    continue
+                if (not allow_multi_classes) and (t in slot_taken):
+                    continue
+                assistant = t
                 slot_taken.add(t)
-                # refill 단계에서는 quota 차감하지 않음 (이미 0일 수 있음)
-            chief = pair[0] if len(pair) > 0 else "(미배정)"
-            assistant = pair[1] if len(pair) > 1 else "(미배정)"
+                assistant_quota[t] -= 1
+            # 리필(부): quota 상관없이 저우선부터
+            if assistant == "(미배정)":
+                for t in teacher_order_rev:
+                    if assistant != "(미배정)":
+                        break
+                    if not can_use(t, d, p, g, c):
+                        continue
+                    if (not allow_same_person_both_roles) and (t == chief):
+                        continue
+                    if (not allow_multi_classes) and (t in slot_taken):
+                        continue
+                    assistant = t
+                    slot_taken.add(t)
+                    # quota 미차감
             per_slot[(g, c)] = (chief, assistant)
     classroom_assignments[(d, p)] = per_slot
 
 # -----------------------------
-# 3) 일자별 시험 시간표 (시각화) — ✍️ 수기 편집 가능 (시각화) — ✍️ 수기 편집 가능
+# 3) 일자별 시험 시간표 (시각화) — ✍️ 수기 편집 가능 — ✍️ 수기 편집 가능 (시각화) — ✍️ 수기 편집 가능
 # -----------------------------
 st.markdown("---")
 st.subheader("3) 일자별 시험 시간표 (시각화 · 편집 가능)")

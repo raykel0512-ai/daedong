@@ -423,7 +423,7 @@ st.info("시각화 표에서 수정한 내용이 아래 '배정 통계·검증'�
 st.markdown("---")
 st.subheader("4) 배정 통계 & 검증")
 
-# 정/부 역할별 카운트
+# 정/부 역할별 카운트 (편집본 반영)
 counts_chief = defaultdict(int)
 counts_assistant = defaultdict(int)
 for (d, p), per_slot in classroom_assignments_final.items():
@@ -433,22 +433,36 @@ for (d, p), per_slot in classroom_assignments_final.items():
         if isinstance(assistant, str) and assistant and assistant != "(미배정)":
             counts_assistant[assistant] += 1
 
-# 테이블 구성: name, chief_count, assistant_count, total, ideal
+# 우선순위 맵
+prio_map = {}
+if "priority" in df_teachers.columns:
+    try:
+        prio_map = df_teachers.set_index("name")["priority"].to_dict()
+    except Exception:
+        prio_map = {}
+
+# 테이블 구성
 all_names = sorted(set(list(df_teachers["name"])) | set(counts_chief.keys()) | set(counts_assistant.keys()))
 stat_rows = []
 for n in all_names:
     ch = counts_chief.get(n, 0)
     asn = counts_assistant.get(n, 0)
-    priority_val = None
-    if n in df_teachers.set_index("name").index:
-        priority_val = df_teachers.set_index("name").loc[n, "priority"]
-    stat_rows.append({"name": n, "chief_count": ch, "assistant_count": asn, "total": ch + asn, "priority": priority_val})
-stat_df = pd.DataFrame(stat_rows).sort_values(["total", "chief_count", "assistant_count"], ascending=False)
+    pr = prio_map.get(n, None)
+    stat_rows.append({"priority": pr, "name": n, "정감독": ch, "부감독": asn, "total": ch + asn})
+stat_df = pd.DataFrame(stat_rows)
 
-# 이상치(참고용): 전체 배정 칸 수 / 교사 수
-total_assigned_slots = stat_df["total"].sum()
-ideal = round(total_assigned_slots / max(len(all_names), 1), 2)
-stat_df["ideal"] = ideal
+# ideal 계산(행 공통)
+_total = stat_df["total"].sum() if not stat_df.empty else 0
+_ideal = round(_total / max(len(stat_df), 1), 2)
+stat_df["ideal"] = _ideal
+
+# priority 숫자 변환 후 정렬: priority 오름차순 → name 오름차순
+stat_df["_prio_num"] = pd.to_numeric(stat_df["priority"], errors="coerce").fillna(1e9)
+stat_df = stat_df.sort_values(["_prio_num", "name"], ascending=[True, True]).drop(columns=["_prio_num"])
+
+# 컬럼 순서 고정: priority / name / 정감독 / 부감독 / total / ideal
+desired_cols = ["priority", "name", "정감독", "부감독", "total", "ideal"]
+stat_df = stat_df.reindex(columns=desired_cols)
 
 st.dataframe(stat_df, use_container_width=True)
 
@@ -505,8 +519,8 @@ with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
             start_row += 1
             table.to_excel(writer, sheet_name=ws_name, startrow=start_row)
             start_row += len(table) + 2  # 간격
-    # 통계 시트
-    stat_df.to_excel(writer, sheet_name="Statistics", index=False)
+    # 통계 시트 (원하는 컬럼 순서로 저장)
+stat_df.to_excel(writer, sheet_name="Statistics", index=False)
     # 위반 시트 (있을 때만)
     if violations:
         pd.DataFrame(violations).to_excel(writer, sheet_name="Violations", index=False)

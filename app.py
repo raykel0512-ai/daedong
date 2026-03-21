@@ -1,588 +1,618 @@
+# app.py
+# 시험 시감 자동 편성 v2
 # streamlit run app.py
-# 시험 시감 자동 편성 (순번 고정 / 학년·일자별 교시 / 학급 단위 2인 배정: 정·부감독 / 제외: 시간·반·시간+반 / 시각화 중심)
 
+from __future__ import annotations
+
+import json
 from collections import defaultdict
 from datetime import datetime
-import re
 from io import BytesIO
 
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="시험 시감 자동 편성", layout="wide")
+from scheduler import (
+    Teacher,
+    build_teachers,
+    run_assignment,
+    compute_stats,
+    check_violations,
+)
+import db
 
-st.title("🧮 시험 시감 자동 편성 프로그램")
-st.caption(
-    "일수 가변 · **하루별/학년별 교시 수 각각 설정 가능** · 교사 ~50명 기준 · "
-    "가용/제외시간 반영 · **순번 고정 배정** · **학급별 2인(정·부감독) 자동 배정** · 인쇄/다운로드용 정리"
+# ══════════════════════════════════════════════════════════════
+# 페이지 설정
+# ══════════════════════════════════════════════════════════════
+st.set_page_config(
+    page_title="시험 시감 자동 편성",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# -----------------------------
-# Sidebar: 기본 설정
-# -----------------------------
-st.sidebar.header("기본 설정")
+st.title("🧮 시험 시감 자동 편성 v2")
+st.caption(
+    "날별 교사 명단 분리 · 정/부감독 전용 구분 · 특정 반 추가 배정 · "
+    "누적 통계 · Supabase 공유 저장"
+)
 
-# 시험 일수
-num_days = st.sidebar.number_input("시험 일수(일)", min_value=1, max_value=10, value=4, step=1)
+# ══════════════════════════════════════════════════════════════
+# Supabase 연결
+# ══════════════════════════════════════════════════════════════
+supabase = db.get_client()
+db_connected = supabase is not None
 
-# 학년/학급 구성
-st.sidebar.subheader("학년/학급 구성")
-num_grades = st.sidebar.number_input("학년 수", min_value=1, max_value=6, value=3, step=1)
-classes_per_grade = st.sidebar.number_input("학년별 학급 수(동일)", min_value=1, max_value=30, value=8, step=1)
+if not db_connected:
+    st.info(
+        "💡 Supabase가 연결되지 않아 **로컬 세션 모드**로 동작합니다. "
+        "저장/공유 기능을 사용하려면 `.streamlit/secrets.toml`을 설정하세요 (README 참조).",
+        icon="ℹ️",
+    )
 
-# 하루·학년별 교시 수
-st.sidebar.subheader("하루별·학년별 교시 수 설정")
+# ══════════════════════════════════════════════════════════════
+# 사이드바: 기본 설정
+# ══════════════════════════════════════════════════════════════
+with st.sidebar:
+    st.header("⚙️ 기본 설정")
 
-# 부족 인원 대응 옵션
-st.sidebar.subheader("부족 인원 대응 옵션")
-allow_multi_classes = st.sidebar.checkbox("같은 교시 여러 교실 담당 허용(중복 배정)", value=False, help="교사가 한 교시 동안 여러 반을 맡을 수 있도록 허용합니다.")
-allow_same_person_both_roles = st.sidebar.checkbox("한 반에서 정·부감독을 같은 교사가 겸임 허용", value=False, help="인원이 매우 부족할 때만 권장합니다.")
-# periods_by_day_by_grade[d][g] = d일차 g학년 교시 수
-periods_by_day_by_grade = []
-for d in range(1, num_days + 1):
-    with st.sidebar.expander(f"{d}일차 교시 수", expanded=(d == 1)):
-        per_grade = []
-        for g in range(1, num_grades + 1):
-            per_grade.append(
-                st.number_input(
-                    f"{g}학년", min_value=0, max_value=10, value=2, step=1, key=f"pbdg_{d}_{g}"
+    # ── 시험 세션 관리 (DB 연결 시) ──────────────────────────
+    if db_connected:
+        st.subheader("📂 시험 세션")
+        sessions = db.list_sessions(supabase)
+        session_names = ["+ 새 세션 만들기"] + [s["name"] for s in sessions]
+        selected_session_name = st.selectbox("세션 선택", session_names)
+
+        if selected_session_name == "+ 새 세션 만들기":
+            new_session_name = st.text_input("새 세션 이름", placeholder="예: 2025-1학기 중간고사")
+            st.session_state["current_session_id"] = None
+            st.session_state["current_session_name"] = new_session_name
+        else:
+            sel = next((s for s in sessions if s["name"] == selected_session_name), None)
+            if sel:
+                st.session_state["current_session_id"] = sel["id"]
+                st.session_state["current_session_name"] = sel["name"]
+        st.markdown("---")
+
+    # ── 시험 일수 ────────────────────────────────────────────
+    num_days = st.number_input("시험 일수", min_value=1, max_value=10, value=4, step=1)
+
+    # ── 학년/학급 구성 ────────────────────────────────────────
+    st.subheader("학년/학급 구성")
+    num_grades = st.number_input("학년 수", min_value=1, max_value=6, value=3, step=1)
+    classes_per_grade = st.number_input(
+        "학년별 학급 수 (동일)", min_value=1, max_value=30, value=8, step=1
+    )
+
+    # ── 하루·학년별 교시 수 ───────────────────────────────────
+    st.subheader("일차별·학년별 교시 수")
+    periods_by_day_grade: list[list[int]] = []
+    for d in range(1, num_days + 1):
+        with st.expander(f"{d}일차", expanded=(d == 1)):
+            per_grade = []
+            for g in range(1, num_grades + 1):
+                per_grade.append(
+                    st.number_input(
+                        f"{g}학년 교시 수",
+                        min_value=0,
+                        max_value=10,
+                        value=2,
+                        step=1,
+                        key=f"pbd_{d}_{g}",
+                    )
                 )
-            )
-        periods_by_day_by_grade.append(per_grade)
+            periods_by_day_grade.append(per_grade)
 
-st.sidebar.markdown("---")
+    st.markdown("---")
 
-# -----------------------------
-# 데이터 업로드 & 템플릿
-# -----------------------------
-st.subheader("1) 교사 명단 업로드")
+    # ── 누적 통계 기준 일차 ───────────────────────────────────
+    st.subheader("누적 통계 기준")
+    accum_from_day = st.number_input(
+        "누적 집계 시작 일차 (1 = 전체)",
+        min_value=1,
+        max_value=num_days,
+        value=1,
+        step=1,
+    )
 
-st.write("""
-CSV 파일을 업로드하세요. 
+# ══════════════════════════════════════════════════════════════
+# 섹션 1 · CSV 업로드 (날별)
+# ══════════════════════════════════════════════════════════════
+st.markdown("---")
+st.subheader("① 일차별 교사 명단 업로드")
 
-**필수 열**
-- `name`
+st.markdown("""
+**CSV 필수 열**: `name`
 
-**선택 열**
-- `exclude` : 제외 규칙
-- `priority` : 우선순위 (숫자, 작을수록 먼저 배정)
+**선택 열**:
+| 열 이름 | 설명 | 예시 |
+|--------|------|------|
+| `role` | 역할 구분 | `정부` (기본) / `부만` |
+| `exclude` | 제외 규칙 (세미콜론 구분) | `D1P2; 1-3; D2P1@2-4` |
+| `extra_classes` | 추가 감독 담당 반 | `1-4~6` 또는 `1-4,1-5` |
+| `priority` | 우선순위 (숫자, 작을수록 먼저) | `1` |
 
-**제외 규칙 예시**
-- 시간 제외: `D1P2`  → 1일차 2교시 제외
-- 반 제외: `1-3` 또는 `C1-3`  → 1학년 3반 전체 제외
-- 특정 시간+반 제외: `D1P2@1-3`  → 1일차 2교시의 1학년 3반 제외
-- 여러 항목은 세미콜론(;)으로 구분: `D1P2; 2-4; D2P1@3-7`
+**제외 규칙 형식**:
+- `D1P2` → 1일차 2교시 전체
+- `1-3` → 1학년 3반 전체
+- `D1P2@1-3` → 1일차 2교시 1학년 3반만
 
-**우선순위 예시**
-- `priority = 1` → 가장 우선
-- `priority = 2` → 그 다음
-- 입력하지 않으면 모두 동일 우선
+**추가 감독 반 (extra_classes)**:
+- `1-4~6` → 1학년 4, 5, 6반
+- `2-1,2-2` → 2학년 1반, 2반
 """)
 
-# 샘플/템플릿 다운로드
+# 샘플 CSV 다운로드
 sample_df = pd.DataFrame({
-    "name": [f"교사{i:02d}" for i in range(1, 41)],
-    "exclude": ["", "D1P2", "2-3", "D2P1@1-4", "", "", "3-7", "D1P1; D3P2@2-1"] + [""] * 32,
-    "priority": [1,1,2,2,3,3] + [None]*34,
+    "name": [f"교사{i:02d}" for i in range(1, 11)],
+    "role": ["정부"] * 8 + ["부만"] * 2,
+    "exclude": ["", "D1P2", "1-3", "D2P1@1-4", "", "", "", "", "", ""],
+    "extra_classes": ["", "", "", "", "1-4~6", "", "", "", "", ""],
+    "priority": [1, 1, 2, 2, 3, 3, None, None, None, None],
 })
-col_s1, col_s2 = st.columns(2)
-with col_s1:
-    st.download_button(
-        "샘플 CSV 내려받기",
-        data=sample_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="sample_teachers.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
-with col_s2:
-    empty_df = pd.DataFrame({"name": [], "exclude": [], "priority": []})
-    st.download_button(
-        "빈 템플릿 내려받기",
-        data=empty_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="teachers_template.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
-
-uploaded = st.file_uploader("교사 명단 CSV 업로드", type=["csv"])  
-
-# CSV 로딩
-if uploaded is not None:
-    try:
-        df_teachers = pd.read_csv(uploaded)
-    except UnicodeDecodeError:
-        df_teachers = pd.read_csv(uploaded, encoding="utf-8-sig")
-    df_teachers.columns = [c.strip().lower() for c in df_teachers.columns]
-    if "name" not in df_teachers.columns:
-        st.error("CSV에 반드시 'name' 열이 있어야 합니다.")
-        st.stop()
-    if "exclude" not in df_teachers.columns:
-        df_teachers["exclude"] = ""
-    if "priority" not in df_teachers.columns:
-        df_teachers["priority"] = None
-else:
-    st.info("샘플 데이터로 미리보기 중입니다. 실제 편성 전 CSV를 업로드하세요.")
-    df_teachers = pd.DataFrame({
-        "name": [f"교사{i:02d}" for i in range(1, 41)],
-        "exclude": [""] * 40,
-        "priority": [None] * 40,
-    })
-
-st.dataframe(df_teachers, use_container_width=True)
-
-# -----------------------------
-# 슬롯 정의
-# -----------------------------
-# 감독 슬롯: 각 일자에서 학년별 교시 수 중 "최대 교시"만큼 D#P# 슬롯을 생성
-slots = []  # (day, period)
-for d in range(1, num_days + 1):
-    max_p = max([int(periods_by_day_by_grade[d - 1][g - 1]) for g in range(1, num_grades + 1)] + [0])
-    for p in range(1, max_p + 1):
-        slots.append((d, p))
-
-st.markdown("---")
-st.subheader("2) 제외 규칙 형식")
-st.write(
-    "- `D1P2` → 1일차 2교시 전체 제외\n"
-    "- `1-3` or `C1-3` → 1학년 3반 전체 시간 제외\n"
-    "- `D1P2@1-3` → 1일차 2교시의 1학년 3반만 제외"
+st.download_button(
+    "📥 샘플 CSV 내려받기",
+    data=sample_df.to_csv(index=False).encode("utf-8-sig"),
+    file_name="sample_teachers.csv",
+    mime="text/csv",
 )
 
-# -----------------------------
-# exclude 파싱 (시간 / 반 / 시간+반)
-# -----------------------------
-exclude_time = defaultdict(set)        # t -> {(d,p)}
-exclude_class = defaultdict(set)       # t -> {(g,c)}
-exclude_time_class = defaultdict(set)  # t -> {(d,p,g,c)}
+# 날별 업로드 탭
+upload_tabs = st.tabs([f"{d}일차 교사" for d in range(1, num_days + 1)])
+day_teacher_dfs: list[pd.DataFrame | None] = []
 
-class_pat = re.compile(r"^(?:C)?(\d+)-(\d+)$")
+for d_idx, utab in enumerate(upload_tabs, start=1):
+    with utab:
+        col_upload, col_preview = st.columns([1, 2])
+        with col_upload:
+            # DB에서 불러오기 버튼
+            loaded_from_db = None
+            if db_connected and st.session_state.get("current_session_id"):
+                if st.button(f"☁️ DB에서 불러오기", key=f"db_load_{d_idx}"):
+                    raw = db.load_day_teachers(
+                        supabase, st.session_state["current_session_id"], d_idx
+                    )
+                    if raw:
+                        loaded_from_db = pd.read_json(raw)
+                        st.success("불러왔습니다!")
+                    else:
+                        st.warning("저장된 명단 없음")
 
-def parse_exclude_token(tok):
-    tok = tok.strip()
-    if not tok:
-        return (None, None, None)
-    # 시간+반 (예: D1P2@1-3)
-    if "@" in tok:
-        left, right = tok.split("@", 1)
-        d, p = None, None
-        right = right.strip()
-        m = class_pat.match(right.replace(" ", ""))
-        g, c = (int(m.group(1)), int(m.group(2))) if m else (None, None)
-        up = left.upper().replace(" ", "")
-        if up.startswith("D") and "P" in up:
+            uploaded = st.file_uploader(
+                f"{d_idx}일차 교사 명단 CSV",
+                type=["csv"],
+                key=f"upload_{d_idx}",
+            )
+
+        df = None
+        if uploaded is not None:
             try:
-                d = int(up.split("P")[0].replace("D", ""))
-                p = int(up.split("P")[1])
-            except Exception:
-                d, p = None, None
-        return (d, p, (g, c))
-    # 시간만 (D#P#)
-    up = tok.upper().replace(" ", "")
-    if up.startswith("D") and "P" in up:
-        try:
-            d = int(up.split("P")[0].replace("D", ""))
-            p = int(up.split("P")[1])
-            return (d, p, None)
-        except Exception:
-            return (None, None, None)
-    # 반만 (1-3, C1-3)
-    m = class_pat.match(up)
-    if m:
-        return (None, None, (int(m.group(1)), int(m.group(2))))
-    return (None, None, None)
+                df = pd.read_csv(uploaded)
+            except UnicodeDecodeError:
+                df = pd.read_csv(uploaded, encoding="utf-8-sig")
+            df.columns = [c.strip().lower() for c in df.columns]
+            if "name" not in df.columns:
+                st.error("'name' 열이 없습니다.")
+                df = None
+        elif loaded_from_db is not None:
+            df = loaded_from_db
 
-for _, row in df_teachers.iterrows():
-    name = str(row["name"]).strip()
-    excl_raw = str(row.get("exclude", "")).strip()
-    if not excl_raw:
-        continue
-    for tok in [t for t in excl_raw.split(";") if t.strip()]:
-        d, p, gc = parse_exclude_token(tok)
-        if d and p and gc and all(gc):
-            exclude_time_class[name].add((d, p, gc[0], gc[1]))
-        elif d and p:
-            exclude_time[name].add((d, p))
-        elif gc and all(gc):
-            exclude_class[name].add((gc[0], gc[1]))
+        # 빈 경우 샘플 사용
+        if df is None:
+            df = pd.DataFrame({
+                "name": [f"교사{i:02d}" for i in range(1, 11)],
+                "role": ["정부"] * 8 + ["부만"] * 2,
+                "exclude": [""] * 10,
+                "extra_classes": [""] * 10,
+                "priority": [None] * 10,
+            })
+            st.caption("📋 샘플 데이터 (CSV를 업로드하면 교체됩니다)")
 
-# -----------------------------
-# 배정 알고리즘 (우선순위 기반 균등할당 + 정감독 저우선(숫자 큼) 편중)
-# -----------------------------
-teachers = df_teachers["name"].tolist()
-if len(teachers) == 0:
-    st.error("교사 명단이 비어 있습니다.")
-    st.stop()
+        # 열 보정
+        for col, default in [("role", "정부"), ("exclude", ""), ("extra_classes", ""), ("priority", None)]:
+            if col not in df.columns:
+                df[col] = default
 
-# 우선순위 정렬: priority가 낮은 숫자일수록 '우선이 높음', 큰 숫자일수록 '우선 낮음(더 많이 배정)'
-_df = df_teachers.copy()
-_df["_order"] = range(len(_df))
-_df["priority_num"] = pd.to_numeric(_df.get("priority"), errors="coerce")
-_df["priority_num"].fillna(1e9, inplace=True)
-_df.sort_values(["priority_num", "_order"], inplace=True)
-teacher_order = _df["name"].tolist()               # priority 오름차순 (우선 높은 → 낮은)
-teacher_order_rev = list(reversed(teacher_order))   # priority 내림차순 (우선 낮은 → 높은)
+        with col_preview:
+            st.dataframe(df, use_container_width=True, height=250)
 
-# 전체 필요 자리 수 계산
-# 각 활성 (일,교시)마다 활성 학년 수 × 반수 × 2(정/부)
-rooms_total = 0
-for (d, p) in slots:
-    active_grades = [g for g in range(1, num_grades + 1) if int(periods_by_day_by_grade[d - 1][g - 1]) >= p]
-    rooms_total += len(active_grades) * classes_per_grade
-chief_needed = rooms_total           # 정감독 총 필요 수
-assistant_needed = rooms_total       # 부감독 총 필요 수
+        # DB 저장 버튼
+        if db_connected and st.session_state.get("current_session_id"):
+            if st.button(f"💾 {d_idx}일차 명단 DB 저장", key=f"db_save_{d_idx}"):
+                db.save_day_teachers(
+                    supabase,
+                    st.session_state["current_session_id"],
+                    d_idx,
+                    df.to_json(orient="records", force_ascii=False),
+                )
+                st.success("저장 완료!")
 
-N = max(len(teacher_order), 1)
+        day_teacher_dfs.append(df)
 
-# 정/부 별 균등 몫 + 잔여 분배: 잔여는 '우선 낮은(숫자 큰)' 교사에게 먼저 → 저우선일수록 더 많이
-chief_base = chief_needed // N
-chief_rem = chief_needed - chief_base * N
-chief_quota = {t: chief_base for t in teacher_order}
-for t in teacher_order_rev:
-    if chief_rem <= 0:
-        break
-    chief_quota[t] += 1
-    chief_rem -= 1
+# ══════════════════════════════════════════════════════════════
+# 섹션 2 · 자동 배정 실행
+# ══════════════════════════════════════════════════════════════
+st.markdown("---")
+st.subheader("② 자동 배정 실행")
 
-assistant_base = assistant_needed // N
-assistant_rem = assistant_needed - assistant_base * N
-assistant_quota = {t: assistant_base for t in teacher_order}
-for t in teacher_order_rev:
-    if assistant_rem <= 0:
-        break
-    assistant_quota[t] += 1
-    assistant_rem -= 1
-
-# 배정 본 실행
-classroom_assignments = dict()  # (d,p) -> dict[(g,c)] = (chief, assistant)
-
-def can_use(t, d, p, g, c):
-    if (d, p) in exclude_time.get(t, set()):
-        return False
-    if (g, c) in exclude_class.get(t, set()):
-        return False
-    if (d, p, g, c) in exclude_time_class.get(t, set()):
-        return False
-    return True
-
-# 실제 배정 — "일자/교시 진행형 동적 균등" 방식
-# 다음 슬롯으로 갈수록 **현재까지 total이 적은 교사**를 우선 배정하고,
-# 동률이면 **우선 낮음(priority 숫자 큼)** → 원래 입력 순서 순으로 타이브레이크.
-# (정/부 쿼터는 그대로 유지)
-classroom_assignments = dict()  # (d,p) -> dict[(g,c)] = (chief, assistant)
-
-# 런닝 카운트(총합)
-running_total = defaultdict(int)
-
-# 우선순위/인덱스 맵
-# priority를 숫자로 안전 변환(이미 _df["priority_num"] 존재)
-prio_map_num = dict(zip(_df["name"].tolist(), _df["priority_num"].tolist()))
-orig_index = {name: i for i, name in enumerate(_df["name"].tolist())}
-
-def sorted_candidates(role: str, slot_taken: set):
-    # role: "chief" or "assistant" (쿼터 선택용)
-    q = chief_quota if role == "chief" else assistant_quota
-    # 현재까지 적게 들어간 사람 우선, 동률 시 priority 큰 사람(저우선) 우선, 또 동률 시 초기 인덱스
-    return sorted(
-        teacher_order,
-        key=lambda t: (running_total[t], -prio_map_num.get(t, 1e9), orig_index.get(t, 1e9))
+# 이전 누적 통계 불러오기 (DB 연결 시)
+prev_counts: dict = {}
+if db_connected and st.session_state.get("current_session_id"):
+    prev_counts = db.load_cumulative_stats(
+        supabase, st.session_state["current_session_id"]
     )
 
-for (d, p) in slots:
-    active_grades = [g for g in range(1, num_grades + 1) if int(periods_by_day_by_grade[d - 1][g - 1]) >= p]
-    slot_taken = set()  # 같은 교시 중복 방지(옵션으로 완화)
-    per_slot = {}
+run_btn = st.button("🚀 배정 시작", type="primary", use_container_width=True)
 
-    for g in active_grades:
-        for c in range(1, classes_per_grade + 1):
-            chief, assistant = "(미배정)", "(미배정)"
+# session_state 초기화
+if "assignments" not in st.session_state:
+    st.session_state["assignments"] = {}
+if "all_teachers" not in st.session_state:
+    st.session_state["all_teachers"] = []
+if "stat_rows" not in st.session_state:
+    st.session_state["stat_rows"] = []
 
-            # 1) 정감독: quota>0 우선, 러닝 total 기준으로 정렬
-            for t in sorted_candidates("chief", slot_taken):
-                if chief != "(미배정)":
-                    break
-                if chief_quota.get(t, 0) <= 0:
-                    continue
-                if (not allow_multi_classes) and (t in slot_taken):
-                    continue
-                if not ((d, p) not in exclude_time.get(t, set())
-                        and (g, c) not in exclude_class.get(t, set())
-                        and (d, p, g, c) not in exclude_time_class.get(t, set())):
-                    continue
-                chief = t
-                slot_taken.add(t)
-                chief_quota[t] -= 1
-                running_total[t] += 1  # 즉시 반영
+if run_btn:
+    # 날별 교사 리스트 구성 (공용: 유니크 name 기준 병합)
+    # 배정은 각 날의 교사만 사용 → 날별로 run_assignment 호출
+    all_assignments: dict = {}
+    all_teachers_union: list[Teacher] = []
+    seen_names: set[str] = set()
 
-            # 리필(정): quota 무시, 동일 정렬 기준으로 채움
-            if chief == "(미배정)":
-                for t in sorted_candidates("chief", slot_taken):
-                    if chief != "(미배정)":
-                        break
-                    if (not allow_multi_classes) and (t in slot_taken):
-                        continue
-                    if not ((d, p) not in exclude_time.get(t, set())
-                            and (g, c) not in exclude_class.get(t, set())
-                            and (d, p, g, c) not in exclude_time_class.get(t, set())):
-                        continue
-                    chief = t
-                    slot_taken.add(t)
-                    running_total[t] += 1  # 리필도 총합 반영
+    day_teacher_lists: list[list[Teacher]] = []
+    for d_idx, df in enumerate(day_teacher_dfs, start=1):
+        if df is None:
+            day_teacher_lists.append([])
+            continue
+        tlist = build_teachers(df)
+        day_teacher_lists.append(tlist)
+        for t in tlist:
+            if t.name not in seen_names:
+                all_teachers_union.append(t)
+                seen_names.add(t.name)
 
-            # 2) 부감독: quota>0 우선, 러닝 total 기준 + 정과 동일 제약
-            for t in sorted_candidates("assistant", slot_taken):
-                if assistant != "(미배정)":
-                    break
-                if assistant_quota.get(t, 0) <= 0:
-                    continue
-                if (not allow_same_person_both_roles) and (t == chief):
-                    continue
-                if (not allow_multi_classes) and (t in slot_taken):
-                    continue
-                if not ((d, p) not in exclude_time.get(t, set())
-                        and (g, c) not in exclude_class.get(t, set())
-                        and (d, p, g, c) not in exclude_time_class.get(t, set())):
-                    continue
-                assistant = t
-                slot_taken.add(t)
-                assistant_quota[t] -= 1
-                running_total[t] += 1
+    # 날별 배정 실행
+    for d_idx in range(1, num_days + 1):
+        tlist = day_teacher_lists[d_idx - 1]
+        if not tlist:
+            # 교사 없으면 빈 슬롯
+            max_p = max(
+                (int(periods_by_day_grade[d_idx - 1][g - 1]) for g in range(1, num_grades + 1)),
+                default=0,
+            )
+            for p in range(1, max_p + 1):
+                active_g = [
+                    g for g in range(1, num_grades + 1)
+                    if int(periods_by_day_grade[d_idx - 1][g - 1]) >= p
+                ]
+                inner = {}
+                for g in active_g:
+                    for c in range(1, classes_per_grade + 1):
+                        inner[(g, c)] = ("(미배정)", "(미배정)")
+                all_assignments[(d_idx, p)] = inner
+            continue
 
-            # 리필(부)
-            if assistant == "(미배정)":
-                for t in sorted_candidates("assistant", slot_taken):
-                    if assistant != "(미배정)":
-                        break
-                    if (not allow_same_person_both_roles) and (t == chief):
-                        continue
-                    if (not allow_multi_classes) and (t in slot_taken):
-                        continue
-                    if not ((d, p) not in exclude_time.get(t, set())
-                            and (g, c) not in exclude_class.get(t, set())
-                            and (d, p, g, c) not in exclude_time_class.get(t, set())):
-                        continue
-                    assistant = t
-                    slot_taken.add(t)
-                    running_total[t] += 1
+        # 이 날에 해당하는 슬롯만 배정
+        single_day_periods = [[int(periods_by_day_grade[d_idx - 1][g - 1]) for g in range(1, num_grades + 1)]]
+        result = run_assignment(
+            teachers=tlist,
+            num_days=1,
+            num_grades=num_grades,
+            classes_per_grade=classes_per_grade,
+            periods_by_day_grade=single_day_periods,
+            prev_counts=prev_counts,
+        )
+        # result key는 (1, p) → (d_idx, p) 로 변환
+        for (_, p), per_slot in result.items():
+            all_assignments[(d_idx, p)] = per_slot
 
-            per_slot[(g, c)] = (chief, assistant)
+    st.session_state["assignments"] = all_assignments
+    st.session_state["all_teachers"] = all_teachers_union
 
-    classroom_assignments[(d, p)] = per_slot
+    # 통계 계산
+    stat_rows = compute_stats(all_assignments, all_teachers_union, prev_counts)
+    st.session_state["stat_rows"] = stat_rows
 
-# -----------------------------
-# 3) 일자별 시험 시간표 (시각화) — ✍️ 수기 편집 가능 (시각화) — ✍️ 수기 편집 가능 (시각화) — ✍️ 수기 편집 가능 — ✍️ 수기 편집 가능 (시각화) — ✍️ 수기 편집 가능
-# -----------------------------
-st.markdown("---")
-st.subheader("3) 일자별 시험 시간표 (시각화 · 편집 가능)")
+    # DB 저장
+    if db_connected:
+        sid = st.session_state.get("current_session_id")
+        if not sid and st.session_state.get("current_session_name"):
+            meta = {
+                "num_days": num_days,
+                "num_grades": num_grades,
+                "classes_per_grade": classes_per_grade,
+            }
+            sid = db.create_session(
+                supabase,
+                st.session_state["current_session_name"],
+                meta,
+            )
+            if sid:
+                st.session_state["current_session_id"] = sid
+        if sid:
+            db.save_assignments(supabase, sid, db.assignments_to_json(all_assignments))
+            db.save_cumulative_stats(supabase, sid, stat_rows)
+            st.success(f"✅ 배정 완료 & DB 저장 (세션: {st.session_state['current_session_name']})")
+        else:
+            st.success("✅ 배정 완료 (로컬)")
+    else:
+        st.success("✅ 배정 완료 (로컬 모드)")
 
-# 원본 생성 결과 → 편집본을 담을 컨테이너
-tables_original = {}
-tables_edited = {}
 
-if num_days > 0:
+# ══════════════════════════════════════════════════════════════
+# DB에서 기존 배정 불러오기
+# ══════════════════════════════════════════════════════════════
+if db_connected and st.session_state.get("current_session_id") and not st.session_state["assignments"]:
+    if st.button("☁️ 기존 배정 결과 DB에서 불러오기"):
+        loaded = db.load_assignments(supabase, st.session_state["current_session_id"])
+        if loaded:
+            st.session_state["assignments"] = loaded
+            st.success("불러왔습니다!")
+        else:
+            st.info("저장된 배정 결과 없음")
+
+# ══════════════════════════════════════════════════════════════
+# 섹션 3 · 시각화 (일차별 탭)
+# ══════════════════════════════════════════════════════════════
+assignments: dict = st.session_state.get("assignments", {})
+
+if assignments:
+    st.markdown("---")
+    st.subheader("③ 일차별 시험 시간표")
+
     tabs = st.tabs([f"{d}일차" for d in range(1, num_days + 1)])
+    tables_edited: dict[tuple, pd.DataFrame] = {}
+
     for d_idx, tab in enumerate(tabs, start=1):
         with tab:
-            st.markdown(f"#### 📚 {d_idx}일차 학년별 시감 표 (정/부 별도 행)")
             for g in range(1, num_grades + 1):
-                p_cnt = int(periods_by_day_by_grade[d_idx - 1][g - 1])
-                if p_cnt <= 0:
+                p_cnt = int(periods_by_day_grade[d_idx - 1][g - 1])
+                if p_cnt == 0:
                     continue
-                cols = [f"{g}-{c}" for c in range(1, classes_per_grade + 1)]
-                # 행을 교시*2로 만들어 정/부를 분리 표기 (P1-정, P1-부, ...)
-                idx = []
+
+                cols_hdr = [f"{g}-{c}반" for c in range(1, classes_per_grade + 1)]
+                idx_labels = []
                 for p in range(1, p_cnt + 1):
-                    idx.append(f"P{p}-정")
-                    idx.append(f"P{p}-부")
-                table = pd.DataFrame("", index=idx, columns=cols)
+                    idx_labels += [f"P{p} 정감독", f"P{p} 부감독"]
+
+                table = pd.DataFrame("", index=idx_labels, columns=cols_hdr)
                 for p in range(1, p_cnt + 1):
-                    per_slot = classroom_assignments.get(((d_idx, p)), {})
+                    per_slot = assignments.get((d_idx, p), {})
                     for c in range(1, classes_per_grade + 1):
-                        chief, assistant = per_slot.get((g, c), ("", ""))
-                        if chief:
-                            table.loc[f"P{p}-정", f"{g}-{c}"] = chief
-                        if assistant:
-                            table.loc[f"P{p}-부", f"{g}-{c}"] = assistant
-                tables_original[(d_idx, g)] = table.copy()
-                st.markdown(f"**{g}학년** (교시수: {p_cnt}) — 셀을 클릭해 교사명을 직접 수정/추가하세요")
-                tables_edited[(d_idx, g)] = st.data_editor(
+                        chief, asst = per_slot.get((g, c), ("", ""))
+                        table.loc[f"P{p} 정감독", f"{g}-{c}반"] = chief if chief != "(미배정)" else ""
+                        table.loc[f"P{p} 부감독", f"{g}-{c}반"] = asst if asst != "(미배정)" else ""
+
+                st.markdown(f"#### {g}학년 ({p_cnt}교시)")
+                edited = st.data_editor(
                     table,
-                    key=f"viz_{d_idx}_{g}",
-                    num_rows="dynamic",
+                    key=f"edit_{d_idx}_{g}",
                     use_container_width=True,
                     hide_index=False,
+                    num_rows="fixed",
                 )
+                tables_edited[(d_idx, g)] = edited
 
-# 편집 결과를 반영하여 최종 배정으로 재구성
-classroom_assignments_final = {}
-for (d, p) in slots:
-    classroom_assignments_final[(d, p)] = {}
+    # 수정된 표 → assignments 재구성
+    if tables_edited:
+        new_assignments: dict = {}
+        for (d, g), ed in tables_edited.items():
+            for row_label, row in ed.iterrows():
+                # 행 레이블: "P1 정감독" / "P1 부감독"
+                parts = row_label.split(" ")
+                if len(parts) < 2:
+                    continue
+                try:
+                    p = int(parts[0].replace("P", ""))
+                except ValueError:
+                    continue
+                role = "chief" if "정" in parts[1] else "assistant"
+                for col_label, val in row.items():
+                    # 열: "1-3반"
+                    col_clean = col_label.replace("반", "")
+                    try:
+                        g_str, c_str = col_clean.split("-")
+                        col_g, col_c = int(g_str), int(c_str)
+                    except ValueError:
+                        continue
+                    if col_g != g:
+                        continue
 
-for (d, g), ed in tables_edited.items():
-    # ed의 인덱스는 P#-정 / P#-부
-    for idx_label, row in ed.iterrows():
-        try:
-            p_str, role = idx_label.split("-")
-            p = int(p_str.replace("P", ""))
-        except Exception:
-            continue
-        for col, val in row.items():
-            if not isinstance(val, str):
-                continue
-            name = val.strip()
-            if name == "":
-                name = "(미배정)"
-            # 열은 g-반번호 형태
-            try:
-                g_str, c_str = col.split("-")
-                g_check = int(g_str)
-                c = int(c_str)
-            except Exception:
-                continue
-            if g_check != g:
-                continue
-            chief, assistant = classroom_assignments_final.get((d, p), {}).get((g, c), ("(미배정)", "(미배정)"))
-            if role == "정":
-                chief = name
+                    name = str(val).strip() if isinstance(val, str) else ""
+                    if not name:
+                        name = "(미배정)"
+
+                    key = (d, p)
+                    if key not in new_assignments:
+                        new_assignments[key] = {}
+                    current = new_assignments[key].get((col_g, col_c), ("(미배정)", "(미배정)"))
+                    chief_v, asst_v = current
+                    if role == "chief":
+                        chief_v = name
+                    else:
+                        asst_v = name
+                    new_assignments[key][(col_g, col_c)] = (chief_v, asst_v)
+
+        # 편집 안된 슬롯은 원본 유지
+        for key, per_slot in assignments.items():
+            if key not in new_assignments:
+                new_assignments[key] = per_slot
             else:
-                assistant = name
-            if (d, p) not in classroom_assignments_final:
-                classroom_assignments_final[(d, p)] = {}
-            classroom_assignments_final[(d, p)][(g, c)] = (chief, assistant)
+                for gc, val in per_slot.items():
+                    if gc not in new_assignments[key]:
+                        new_assignments[key][gc] = val
 
-# 편집된 표가 없다면 원본 자동 배정 사용
-if not any(len(df) for df in tables_edited.values()):
-    classroom_assignments_final = classroom_assignments
+        st.session_state["assignments"] = new_assignments
+        assignments = new_assignments
 
-# 화면 안내
-st.info("시각화 표에서 수정한 내용이 아래 '배정 통계·검증'과 '결과 저장(엑셀)'에 그대로 반영됩니다. 신규 이름도 입력 가능!")
+    # ── 수정 내용 DB 반영 버튼 ──
+    if db_connected and st.session_state.get("current_session_id"):
+        if st.button("💾 수정 내용 DB에 저장", key="save_edited"):
+            db.save_assignments(
+                supabase,
+                st.session_state["current_session_id"],
+                db.assignments_to_json(assignments),
+            )
+            st.success("저장 완료!")
 
-# -----------------------------
-# 4) 배정 통계 & 검증 (옵션) — 편집 반영
-# -----------------------------
-# -----------------------------
-st.markdown("---")
-st.subheader("4) 배정 통계 & 검증")
+# ══════════════════════════════════════════════════════════════
+# 섹션 4 · 배정 통계
+# ══════════════════════════════════════════════════════════════
+if assignments and st.session_state.get("all_teachers"):
+    st.markdown("---")
+    st.subheader("④ 배정 통계 & 검증")
 
-# 정/부 역할별 카운트 (편집본 반영)
-counts_chief = defaultdict(int)
-counts_assistant = defaultdict(int)
-for (d, p), per_slot in classroom_assignments_final.items():
-    for (g, c), (chief, assistant) in per_slot.items():
-        if isinstance(chief, str) and chief and chief != "(미배정)":
-            counts_chief[chief] += 1
-        if isinstance(assistant, str) and assistant and assistant != "(미배정)":
-            counts_assistant[assistant] += 1
+    all_teachers: list[Teacher] = st.session_state["all_teachers"]
+    stat_rows = compute_stats(assignments, all_teachers, prev_counts)
+    st.session_state["stat_rows"] = stat_rows
 
-# 우선순위 맵
-prio_map = {}
-if "priority" in df_teachers.columns:
+    stat_df = pd.DataFrame(stat_rows)
+
+    # 정렬
+    stat_df["_prio"] = pd.to_numeric(stat_df["priority"], errors="coerce").fillna(1e9)
+    stat_df = stat_df.sort_values(["_prio", "name"]).drop(columns=["_prio"])
+
+    # 컬럼 순서
+    col_order = [
+        "name", "role", "priority",
+        "정감독(이전)", "정감독(금번)", "정감독(합계)",
+        "부감독(이전)", "부감독(금번)", "부감독(합계)",
+        "총합계",
+    ]
+    stat_df = stat_df.reindex(columns=col_order)
+
+    # 색상 하이라이트 (총합계 기준)
+    def highlight_total(val):
+        if not stat_df["총합계"].empty:
+            avg = stat_df["총합계"].mean()
+            if val > avg * 1.2:
+                return "background-color: #ffcccc"
+            elif val < avg * 0.8:
+                return "background-color: #ccffcc"
+        return ""
+
     try:
-        prio_map = df_teachers.set_index("name")["priority"].to_dict()
-    except Exception:
-        prio_map = {}
+        styled = stat_df.style.map(highlight_total, subset=["총합계"])
+    except AttributeError:
+        # pandas < 2.1 fallback
+        styled = stat_df.style.applymap(highlight_total, subset=["총합계"])
+    st.dataframe(styled, use_container_width=True)
 
-# 테이블 구성
-all_names = sorted(set(list(df_teachers["name"])) | set(counts_chief.keys()) | set(counts_assistant.keys()))
-stat_rows = []
-for n in all_names:
-    ch = counts_chief.get(n, 0)
-    asn = counts_assistant.get(n, 0)
-    pr = prio_map.get(n, None)
-    stat_rows.append({"priority": pr, "name": n, "정감독": ch, "부감독": asn, "total": ch + asn})
-stat_df = pd.DataFrame(stat_rows)
+    # 위반 검사
+    teacher_map = {t.name: t for t in all_teachers}
+    violations = check_violations(assignments, teacher_map)
+    if violations:
+        st.error(f"⚠️ 제외 조건 위반 {len(violations)}건")
+        st.dataframe(pd.DataFrame(violations))
+    else:
+        st.success("✅ 제외 조건 위반 없음")
 
-# ideal 계산(행 공통)
-_total = stat_df["total"].sum() if not stat_df.empty else 0
-_ideal = round(_total / max(len(stat_df), 1), 2)
-stat_df["ideal"] = _ideal
+# ══════════════════════════════════════════════════════════════
+# 섹션 5 · Excel 다운로드
+# ══════════════════════════════════════════════════════════════
+if assignments:
+    st.markdown("---")
+    st.subheader("⑤ 결과 내보내기 (Excel)")
 
-# priority 숫자 변환 후 정렬: priority 오름차순 → name 오름차순
-stat_df["_prio_num"] = pd.to_numeric(stat_df["priority"], errors="coerce").fillna(1e9)
-stat_df = stat_df.sort_values(["_prio_num", "name"], ascending=[True, True]).drop(columns=["_prio_num"])
+    excel_buf = BytesIO()
+    with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
+        workbook = writer.book
 
-# 컬럼 순서 고정: priority / name / 정감독 / 부감독 / total / ideal
-desired_cols = ["priority", "name", "정감독", "부감독", "total", "ideal"]
-stat_df = stat_df.reindex(columns=desired_cols)
+        # ── 서식 ──
+        fmt_header = workbook.add_format({
+            "bold": True, "bg_color": "#4472C4", "font_color": "white",
+            "border": 1, "align": "center", "valign": "vcenter",
+        })
+        fmt_chief = workbook.add_format({
+            "bg_color": "#DDEEFF", "border": 1, "align": "center",
+        })
+        fmt_asst = workbook.add_format({
+            "bg_color": "#EEFFDD", "border": 1, "align": "center",
+        })
+        fmt_unassigned = workbook.add_format({
+            "bg_color": "#FFDDDD", "border": 1, "align": "center", "font_color": "#999999",
+        })
+        fmt_grade_title = workbook.add_format({
+            "bold": True, "bg_color": "#F2F2F2", "border": 1,
+            "align": "left", "valign": "vcenter",
+        })
 
-st.dataframe(stat_df, use_container_width=True)
+        for d in range(1, num_days + 1):
+            ws_name = f"{d}일차"
+            worksheet = workbook.add_worksheet(ws_name)
+            writer.sheets[ws_name] = worksheet
+            worksheet.set_column(0, 0, 12)  # 행 레이블 열
 
-# 제외 위반 검사
-violations = []
-for (d, p), per_slot in classroom_assignments_final.items():
-    for (g, c), (chief, assistant) in per_slot.items():
-        for role, t in [("chief", chief), ("assistant", assistant)]:
-            if isinstance(t, str) and t and t != "(미배정)":
-                if (d, p) in exclude_time.get(t, set()) or (g, c) in exclude_class.get(t, set()) or (d, p, g, c) in exclude_time_class.get(t, set()):
-                    violations.append({"day": d, "period": p, "grade": g, "class": c, "role": role, "name": t})
-violations = []  # ensure variable exists above
-if violations:
-    st.error("제외 시간/반 위반 건이 있습니다. 아래 목록을 확인해 수정하세요.")
-    st.dataframe(pd.DataFrame(violations))
-else:
-    st.success("제외 조건 위반 없음 ✅")
+            start_row = 0
+            for g in range(1, num_grades + 1):
+                p_cnt = int(periods_by_day_grade[d - 1][g - 1])
+                if p_cnt == 0:
+                    continue
 
-# -----------------------------
-# 5) 결과 저장 (CSV)
-# -----------------------------
-st.markdown("---")
-st.subheader("5) 결과 저장 (시각화 형식: Excel)")
+                num_cols = classes_per_grade + 1  # 레이블 포함
 
-# Excel 통합 파일로 내보내기: 일자별 시각화(학년 표) + 통계 시트 + (옵션) 위반 시트
-excel_buf = BytesIO()
-with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
-    # 일자별 시트
-    for d in range(1, num_days + 1):
-        ws_name = f"D{d}"
-        start_row = 0
-        # 워크시트 객체 필요 시 포맷 적용 위해 보관
-        for g in range(1, num_grades + 1):
-            p_cnt = int(periods_by_day_by_grade[d - 1][g - 1])
-            if p_cnt <= 0:
-                continue
-            # 정/부 분리 행 구성
-            idx = []
-            for p in range(1, p_cnt + 1):
-                idx.append(f"P{p}-정")
-                idx.append(f"P{p}-부")
-            cols = [f"{g}-{c}" for c in range(1, classes_per_grade + 1)]
-            table = pd.DataFrame("", index=idx, columns=cols)
-            for p in range(1, p_cnt + 1):
-                per_slot = classroom_assignments_final.get((d, p), {})
+                # 학년 제목 행
+                worksheet.merge_range(
+                    start_row, 0, start_row, num_cols - 1,
+                    f"{g}학년 (교시수: {p_cnt})",
+                    fmt_grade_title,
+                )
+                start_row += 1
+
+                # 헤더 행 (반 번호)
+                worksheet.write(start_row, 0, "교시/역할", fmt_header)
                 for c in range(1, classes_per_grade + 1):
-                    chief, assistant = per_slot.get((g, c), ("", ""))
-                    if chief:
-                        table.loc[f"P{p}-정", f"{g}-{c}"] = chief
-                    if assistant:
-                        table.loc[f"P{p}-부", f"{g}-{c}"] = assistant
-            # 학년 제목 한 줄 쓰고 그 아래 테이블 이어붙이기
-            title_df = pd.DataFrame({f"{g}학년 (교시수:{p_cnt})": []})
-            title_df.to_excel(writer, sheet_name=ws_name, startrow=start_row, index=False)
-            start_row += 1
-            table.to_excel(writer, sheet_name=ws_name, startrow=start_row)
-            start_row += len(table) + 2  # 간격
-    # 통계 시트 (원하는 컬럼 순서로 저장)
-stat_df.to_excel(writer, sheet_name="Statistics", index=False)
-    # 위반 시트 (있을 때만)
-if violations:
-    pd.DataFrame(violations).to_excel(writer, sheet_name="Violations", index=False)
+                    worksheet.write(start_row, c, f"{g}-{c}반", fmt_header)
+                    worksheet.set_column(c, c, 10)
+                start_row += 1
 
-excel_value = excel_buf.getvalue()
+                # 데이터 행
+                for p in range(1, p_cnt + 1):
+                    per_slot = assignments.get((d, p), {})
+                    # 정감독 행
+                    worksheet.write(start_row, 0, f"P{p} 정감독", fmt_header)
+                    for c in range(1, classes_per_grade + 1):
+                        chief, _ = per_slot.get((g, c), ("(미배정)", "(미배정)"))
+                        fmt = fmt_unassigned if chief == "(미배정)" else fmt_chief
+                        worksheet.write(start_row, c, chief, fmt)
+                    start_row += 1
+                    # 부감독 행
+                    worksheet.write(start_row, 0, f"P{p} 부감독", fmt_header)
+                    for c in range(1, classes_per_grade + 1):
+                        _, asst = per_slot.get((g, c), ("(미배정)", "(미배정)"))
+                        fmt = fmt_unassigned if asst == "(미배정)" else fmt_asst
+                        worksheet.write(start_row, c, asst, fmt)
+                    start_row += 1
 
-default_fn = f"exam_schedule_visual_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-st.download_button(
-    label="시각화 엑셀 다운로드 (.xlsx)",
-    data=excel_value,
-    file_name=default_fn,
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    use_container_width=True,
-)
+                start_row += 1  # 학년 간 여백
 
-st.markdown(
-    """
----
-### 사용 팁
-- 엑셀 파일은 **일자별 시트(D1, D2, …)** 로 나뉘고, 각 시트에는 **학년별 표(정/부 행 분리)**가 순서대로 배치됩니다.
-- `Statistics` 시트에서 **정감독/부감독/합계**를 따로 확인할 수 있습니다.
-- `Violations` 시트는 제외 조건 위반이 있을 때만 생성됩니다.
-"""
+        # 통계 시트 (with 블록 안에 있어야 writer 사용 가능)
+        if st.session_state.get("stat_rows"):
+            sdf = pd.DataFrame(st.session_state["stat_rows"])
+            _col_order = [
+                "name", "role", "priority",
+                "정감독(이전)", "정감독(금번)", "정감독(합계)",
+                "부감독(이전)", "부감독(금번)", "부감독(합계)",
+                "총합계",
+            ]
+            sdf = sdf.reindex(columns=_col_order)
+            sdf.to_excel(writer, sheet_name="통계", index=False)
+    # with 블록이 닫히며 자동 저장됨 → getvalue() 호출
+    excel_value = excel_buf.getvalue()
+    fname = f"exam_schedule_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    st.download_button(
+        label="📥 Excel 다운로드",
+        data=excel_value,
+        file_name=fname,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+# ══════════════════════════════════════════════════════════════
+# 푸터
+# ══════════════════════════════════════════════════════════════
+st.markdown("---")
+st.caption(
+    "📌 **공유 방법**: 이 앱 URL을 그대로 공유하면 동일 DB를 바라보므로 "
+    "같은 세션을 선택하면 최신 배정 결과를 함께 볼 수 있습니다. "
+    "| **편집 동기화**: 수정 후 '💾 수정 내용 DB에 저장' → 상대방 새로고침"
 )

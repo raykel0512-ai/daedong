@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from datetime import datetime
 from io import BytesIO
@@ -33,7 +34,7 @@ st.set_page_config(
 st.title("🧮 시험 시감 자동 편성 v2")
 st.caption(
     "날별 교사 명단 분리 · 정/부감독 전용 구분 · 특정 반 추가 배정 · "
-    "누적 통계 · Supabase 공유 저장, 지연쌤 화이팅!"
+    "누적 통계 · Supabase 공유 저장"
 )
 
 # ══════════════════════════════════════════════════════════════
@@ -156,6 +157,38 @@ st.download_button(
     mime="text/csv",
 )
 
+# 구글 스프레드시트 URL → CSV 변환 함수
+def gsheet_url_to_csv_url(url: str) -> str | None:
+    """
+    구글 스프레드시트 공유 URL → CSV 다운로드 URL 변환
+    지원 형식:
+      - https://docs.google.com/spreadsheets/d/SHEET_ID/edit#gid=0
+      - https://docs.google.com/spreadsheets/d/SHEET_ID/edit?usp=sharing
+    """
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url)
+    if not m:
+        return None
+    sheet_id = m.group(1)
+    # gid 파라미터 추출 (시트 탭 구분)
+    gid_m = re.search(r"gid=(\d+)", url)
+    gid = gid_m.group(1) if gid_m else "0"
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+
+
+def load_gsheet(url: str) -> pd.DataFrame | None:
+    """구글 스프레드시트 URL로부터 DataFrame 로드"""
+    csv_url = gsheet_url_to_csv_url(url)
+    if not csv_url:
+        return None
+    try:
+        df = pd.read_csv(csv_url)
+        df.columns = [c.strip().lower() for c in df.columns]
+        return df
+    except Exception as e:
+        st.error(f"구글 스프레드시트 로드 실패: {e}\n공유 설정이 '링크가 있는 모든 사용자'로 되어 있는지 확인하세요.")
+        return None
+
+
 # 날별 업로드 탭
 upload_tabs = st.tabs([f"{d}일차 교사" for d in range(1, num_days + 1)])
 day_teacher_dfs: list[pd.DataFrame | None] = []
@@ -164,8 +197,51 @@ for d_idx, utab in enumerate(upload_tabs, start=1):
     with utab:
         col_upload, col_preview = st.columns([1, 2])
         with col_upload:
-            # DB에서 불러오기 버튼
+            # 입력 방식 선택
+            input_method = st.radio(
+                "입력 방식",
+                ["CSV 파일 업로드", "구글 스프레드시트 URL"],
+                key=f"input_method_{d_idx}",
+                horizontal=True,
+            )
+
             loaded_from_db = None
+            df_input = None
+
+            if input_method == "CSV 파일 업로드":
+                uploaded = st.file_uploader(
+                    f"{d_idx}일차 교사 명단 CSV",
+                    type=["csv"],
+                    key=f"upload_{d_idx}",
+                )
+                if uploaded is not None:
+                    try:
+                        df_input = pd.read_csv(uploaded)
+                    except UnicodeDecodeError:
+                        df_input = pd.read_csv(uploaded, encoding="utf-8-sig")
+                    df_input.columns = [c.strip().lower() for c in df_input.columns]
+                    if "name" not in df_input.columns:
+                        st.error("'name' 열이 없습니다.")
+                        df_input = None
+
+            else:  # 구글 스프레드시트
+                st.caption(
+                    "스프레드시트 공유 설정을 **'링크가 있는 모든 사용자 → 뷰어'** 로 설정해야 해요."
+                )
+                gsheet_url = st.text_input(
+                    "구글 스프레드시트 URL 붙여넣기",
+                    placeholder="https://docs.google.com/spreadsheets/d/...",
+                    key=f"gsheet_url_{d_idx}",
+                )
+                if st.button("📥 불러오기", key=f"gsheet_load_{d_idx}"):
+                    if gsheet_url.strip():
+                        df_input = load_gsheet(gsheet_url.strip())
+                        if df_input is not None:
+                            st.success(f"{len(df_input)}명 불러왔습니다!")
+                    else:
+                        st.warning("URL을 먼저 입력해 주세요.")
+
+            # DB에서 불러오기
             if db_connected and st.session_state.get("current_session_id"):
                 if st.button(f"☁️ DB에서 불러오기", key=f"db_load_{d_idx}"):
                     raw = db.load_day_teachers(
@@ -173,30 +249,13 @@ for d_idx, utab in enumerate(upload_tabs, start=1):
                     )
                     if raw:
                         loaded_from_db = pd.read_json(raw)
-                        st.success("불러왔습니다!")
+                        st.success("DB에서 불러왔습니다!")
                     else:
                         st.warning("저장된 명단 없음")
 
-            uploaded = st.file_uploader(
-                f"{d_idx}일차 교사 명단 CSV",
-                type=["csv"],
-                key=f"upload_{d_idx}",
-            )
+        # 최종 df 결정: 직접입력 > DB > 샘플
+        df = df_input or loaded_from_db
 
-        df = None
-        if uploaded is not None:
-            try:
-                df = pd.read_csv(uploaded)
-            except UnicodeDecodeError:
-                df = pd.read_csv(uploaded, encoding="utf-8-sig")
-            df.columns = [c.strip().lower() for c in df.columns]
-            if "name" not in df.columns:
-                st.error("'name' 열이 없습니다.")
-                df = None
-        elif loaded_from_db is not None:
-            df = loaded_from_db
-
-        # 빈 경우 샘플 사용
         if df is None:
             df = pd.DataFrame({
                 "name": [f"교사{i:02d}" for i in range(1, 11)],
@@ -205,7 +264,7 @@ for d_idx, utab in enumerate(upload_tabs, start=1):
                 "extra_classes": [""] * 10,
                 "priority": [None] * 10,
             })
-            st.caption("📋 샘플 데이터 (CSV를 업로드하면 교체됩니다)")
+            st.caption("📋 샘플 데이터 — CSV 업로드 또는 구글 시트 URL을 입력하면 교체됩니다")
 
         # 열 보정
         for col, default in [("role", "정부"), ("exclude", ""), ("extra_classes", ""), ("priority", None)]:

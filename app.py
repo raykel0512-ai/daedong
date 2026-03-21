@@ -254,7 +254,12 @@ for d_idx, utab in enumerate(upload_tabs, start=1):
                         st.warning("저장된 명단 없음")
 
         # 최종 df 결정: 직접입력 > DB > 샘플
-        df = df_input or loaded_from_db
+        if df_input is not None:
+            df = df_input
+        elif loaded_from_db is not None:
+            df = loaded_from_db
+        else:
+            df = None
 
         if df is None:
             df = pd.DataFrame({

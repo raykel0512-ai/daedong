@@ -115,6 +115,12 @@ with st.sidebar:
         step=1,
     )
 
+# ── 전역 타입 안전 변환 (st.number_input은 float 반환) ──
+num_days          = int(num_days)
+num_grades        = int(num_grades)
+classes_per_grade = int(classes_per_grade)
+periods_by_day_grade = [[int(p) for p in row] for row in periods_by_day_grade]
+
 # ══════════════════════════════════════════════════════════════
 # 섹션 1 · CSV 업로드 (날별)
 # ══════════════════════════════════════════════════════════════
@@ -316,15 +322,14 @@ if "stat_rows" not in st.session_state:
     st.session_state["stat_rows"] = []
 
 if run_btn:
-    # 날별 교사 리스트 구성 (공용: 유니크 name 기준 병합)
-    # 배정은 각 날의 교사만 사용 → 날별로 run_assignment 호출
     all_assignments: dict = {}
     all_teachers_union: list[Teacher] = []
     seen_names: set[str] = set()
 
+    # ── 날별 교사 리스트 구성 ──
     day_teacher_lists: list[list[Teacher]] = []
     for d_idx, df in enumerate(day_teacher_dfs, start=1):
-        if df is None:
+        if df is None or df.empty:
             day_teacher_lists.append([])
             continue
         tlist = build_teachers(df)
@@ -334,29 +339,25 @@ if run_btn:
                 all_teachers_union.append(t)
                 seen_names.add(t.name)
 
-    # 날별 배정 실행
+    # ── 날별 배정 실행 ──
     for d_idx in range(1, num_days + 1):
         tlist = day_teacher_lists[d_idx - 1]
+
+        # 이 날의 교시 설정 (1일치 리스트, shape: [[p_grade1, p_grade2, ...]])
+        single_day_periods = [periods_by_day_grade[d_idx - 1]]
+        max_p = max(single_day_periods[0]) if single_day_periods[0] else 0
+
         if not tlist:
-            # 교사 없으면 빈 슬롯
-            max_p = max(
-                (int(periods_by_day_grade[d_idx - 1][g - 1]) for g in range(1, num_grades + 1)),
-                default=0,
-            )
+            # 교사 없으면 미배정으로 빈 슬롯 채우기
             for p in range(1, max_p + 1):
-                active_g = [
-                    g for g in range(1, num_grades + 1)
-                    if int(periods_by_day_grade[d_idx - 1][g - 1]) >= p
-                ]
                 inner = {}
-                for g in active_g:
-                    for c in range(1, classes_per_grade + 1):
-                        inner[(g, c)] = ("(미배정)", "(미배정)")
+                for g in range(1, num_grades + 1):
+                    if single_day_periods[0][g - 1] >= p:
+                        for c in range(1, classes_per_grade + 1):
+                            inner[(g, c)] = ("(미배정)", "(미배정)")
                 all_assignments[(d_idx, p)] = inner
             continue
 
-        # 이 날에 해당하는 슬롯만 배정
-        single_day_periods = [[int(periods_by_day_grade[d_idx - 1][g - 1]) for g in range(1, num_grades + 1)]]
         result = run_assignment(
             teachers=tlist,
             num_days=1,
@@ -365,7 +366,7 @@ if run_btn:
             periods_by_day_grade=single_day_periods,
             prev_counts=prev_counts,
         )
-        # result key는 (1, p) → (d_idx, p) 로 변환
+        # result key: (1, p) → (d_idx, p) 로 변환
         for (_, p), per_slot in result.items():
             all_assignments[(d_idx, p)] = per_slot
 
@@ -680,3 +681,4 @@ st.caption(
     "같은 세션을 선택하면 최신 배정 결과를 함께 볼 수 있습니다. "
     "| **편집 동기화**: 수정 후 '💾 수정 내용 DB에 저장' → 상대방 새로고침"
 )
+

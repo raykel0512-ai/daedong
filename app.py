@@ -195,6 +195,10 @@ def load_gsheet(url: str) -> pd.DataFrame | None:
         return None
 
 
+# ── session_state에 날별 df 유지 (버튼 클릭시 재실행돼도 데이터 보존) ──
+if "day_dfs" not in st.session_state:
+    st.session_state["day_dfs"] = {}
+
 # 날별 업로드 탭
 upload_tabs = st.tabs([f"{d}일차 교사" for d in range(1, num_days + 1)])
 day_teacher_dfs: list[pd.DataFrame | None] = []
@@ -211,9 +215,6 @@ for d_idx, utab in enumerate(upload_tabs, start=1):
                 horizontal=True,
             )
 
-            loaded_from_db = None
-            df_input = None
-
             if input_method == "CSV 파일 업로드":
                 uploaded = st.file_uploader(
                     f"{d_idx}일차 교사 명단 CSV",
@@ -228,7 +229,10 @@ for d_idx, utab in enumerate(upload_tabs, start=1):
                     df_input.columns = [c.strip().lower() for c in df_input.columns]
                     if "name" not in df_input.columns:
                         st.error("'name' 열이 없습니다.")
-                        df_input = None
+                    else:
+                        # session_state에 저장 → 재실행해도 유지
+                        st.session_state["day_dfs"][d_idx] = df_input
+                        st.success(f"{len(df_input)}명 로드됨")
 
             else:  # 구글 스프레드시트
                 st.caption(
@@ -241,9 +245,10 @@ for d_idx, utab in enumerate(upload_tabs, start=1):
                 )
                 if st.button("📥 불러오기", key=f"gsheet_load_{d_idx}"):
                     if gsheet_url.strip():
-                        df_input = load_gsheet(gsheet_url.strip())
-                        if df_input is not None:
-                            st.success(f"{len(df_input)}명 불러왔습니다!")
+                        df_gs = load_gsheet(gsheet_url.strip())
+                        if df_gs is not None:
+                            st.session_state["day_dfs"][d_idx] = df_gs
+                            st.success(f"{len(df_gs)}명 불러왔습니다!")
                     else:
                         st.warning("URL을 먼저 입력해 주세요.")
 
@@ -254,18 +259,20 @@ for d_idx, utab in enumerate(upload_tabs, start=1):
                         supabase, st.session_state["current_session_id"], d_idx
                     )
                     if raw:
-                        loaded_from_db = pd.read_json(raw)
+                        df_db = pd.read_json(raw)
+                        st.session_state["day_dfs"][d_idx] = df_db
                         st.success("DB에서 불러왔습니다!")
                     else:
                         st.warning("저장된 명단 없음")
 
-        # 최종 df 결정: 직접입력 > DB > 샘플
-        if df_input is not None:
-            df = df_input
-        elif loaded_from_db is not None:
-            df = loaded_from_db
-        else:
-            df = None
+            # 현재 로드된 데이터 초기화 버튼
+            if d_idx in st.session_state["day_dfs"]:
+                if st.button(f"🗑️ {d_idx}일차 초기화", key=f"clear_{d_idx}"):
+                    del st.session_state["day_dfs"][d_idx]
+                    st.rerun()
+
+        # ── 최종 df 결정: session_state > 샘플 ──
+        df = st.session_state["day_dfs"].get(d_idx, None)
 
         if df is None:
             df = pd.DataFrame({
@@ -275,7 +282,11 @@ for d_idx, utab in enumerate(upload_tabs, start=1):
                 "extra_classes": [""] * 10,
                 "priority": [None] * 10,
             })
-            st.caption("📋 샘플 데이터 — CSV 업로드 또는 구글 시트 URL을 입력하면 교체됩니다")
+            with col_preview:
+                st.caption("📋 샘플 데이터 — CSV 업로드 또는 구글 시트 URL을 입력하면 교체됩니다")
+        else:
+            with col_preview:
+                st.caption(f"✅ {len(df)}명 로드됨")
 
         # 열 보정
         for col, default in [("role", "정부"), ("exclude", ""), ("extra_classes", ""), ("priority", None)]:
@@ -681,4 +692,3 @@ st.caption(
     "같은 세션을 선택하면 최신 배정 결과를 함께 볼 수 있습니다. "
     "| **편집 동기화**: 수정 후 '💾 수정 내용 DB에 저장' → 상대방 새로고침"
 )
-

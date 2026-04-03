@@ -1,10 +1,9 @@
 """
-scheduler.py
-시험 시감 자동 배정 알고리즘
-- 날별 교사 명단 지원
-- 정감독 / 부감독 전용 교사 구분
-- 특정 반 추가 감독 가중치
-- 순번 기반 균등 배정
+scheduler.py — 시험 시감 자동 배정 알고리즘 v2.2
+변경사항:
+  - available 열 지원 (가능한 날만 입력, 나머지 자동 exclude)
+  - 정감독 횟수 / 부감독 횟수 각각 독립 균형 유지
+  - 학부모(부만 + priority 낮음) 우선 부감독 배정
 """
 
 from __future__ import annotations
@@ -14,55 +13,33 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-# ──────────────────────────────────────────
-# 데이터 모델
-# ──────────────────────────────────────────
-
 @dataclass
 class Teacher:
     name: str
-    role: str = "정부"          # "정부" | "부만"
+    role: str = "정부"
     priority: float = 1e9
-    exclude_times: set = field(default_factory=set)       # {(d, p), ...}
-    exclude_classes: set = field(default_factory=set)     # {(g, c), ...}
-    exclude_time_class: set = field(default_factory=set)  # {(d, p, g, c), ...}
-    extra_classes: set = field(default_factory=set)       # {(g, c), ...}  ← 추가 감독 대상 반
+    exclude_times: set = field(default_factory=set)
+    exclude_classes: set = field(default_factory=set)
+    exclude_time_class: set = field(default_factory=set)
+    extra_classes: set = field(default_factory=set)
 
-
-@dataclass
-class AssignmentSlot:
-    day: int
-    period: int
-    grade: int
-    cls: int
-    chief: str = "(미배정)"
-    assistant: str = "(미배정)"
-
-
-# ──────────────────────────────────────────
-# 제외 규칙 파서
-# ──────────────────────────────────────────
 
 _CLASS_PAT = re.compile(r"^(?:C)?(\d+)-(\d+)$")
 _TIME_PAT  = re.compile(r"^D(\d+)P(\d+)$")
+_DAY_PAT   = re.compile(r"^D(\d+)$")
 
 
 def parse_exclude_rules(raw: str) -> tuple[set, set, set]:
-    """
-    문자열 → (exclude_times, exclude_classes, exclude_time_class)
-    """
     exc_t, exc_c, exc_tc = set(), set(), set()
     if not raw or str(raw).strip().lower() in ("nan", "none", ""):
         return exc_t, exc_c, exc_tc
-
     for tok in raw.split(";"):
         tok = tok.strip()
         if not tok:
             continue
-
         if "@" in tok:
             left, right = tok.split("@", 1)
-            left = left.strip().upper().replace(" ", "")
+            left  = left.strip().upper().replace(" ", "")
             right = right.strip().upper().replace(" ", "")
             m_t = _TIME_PAT.match(left)
             m_c = _CLASS_PAT.match(right)
@@ -70,25 +47,45 @@ def parse_exclude_rules(raw: str) -> tuple[set, set, set]:
                 exc_tc.add((int(m_t.group(1)), int(m_t.group(2)),
                             int(m_c.group(1)), int(m_c.group(2))))
         else:
-            up = tok.upper().replace(" ", "")
+            up  = tok.upper().replace(" ", "")
             m_t = _TIME_PAT.match(up)
             m_c = _CLASS_PAT.match(up)
             if m_t:
                 exc_t.add((int(m_t.group(1)), int(m_t.group(2))))
             elif m_c:
                 exc_c.add((int(m_c.group(1)), int(m_c.group(2))))
-
     return exc_t, exc_c, exc_tc
 
 
+def parse_available(raw: str, num_days: int, max_period: int = 10) -> set:
+    """
+    available 열: 가능한 날/교시만 입력 → 나머지를 exclude_times로 반환
+    형식: "D1", "D2", "D1P2" 등, 세미콜론 구분
+    빈 값 = 모든 날 가능 (exclude 없음)
+    """
+    raw = str(raw).strip()
+    if not raw or raw.lower() in ("nan", "none", ""):
+        return set()
+
+    possible: set[tuple[int, int]] = set()
+    for tok in raw.split(";"):
+        tok = tok.strip().upper().replace(" ", "")
+        if not tok:
+            continue
+        m_dp = _TIME_PAT.match(tok)
+        m_d  = _DAY_PAT.match(tok)
+        if m_dp:
+            possible.add((int(m_dp.group(1)), int(m_dp.group(2))))
+        elif m_d:
+            d = int(m_d.group(1))
+            for p in range(1, max_period + 1):
+                possible.add((d, p))
+
+    all_slots = {(d, p) for d in range(1, num_days + 1) for p in range(1, max_period + 1)}
+    return all_slots - possible  # 가능하지 않은 슬롯 → exclude
+
+
 def parse_extra_classes(raw: str) -> set:
-    """
-    '1-4,1-5,1-6' 또는 '4~6' (학년 1 고정) 같은 형태 → {(g,c), ...}
-    지원 형식:
-      - g-c  (예: 1-4)
-      - g-c1~c2  (예: 1-4~6 → 1학년 4,5,6반)
-    여러 항목은 쉼표 또는 세미콜론으로 구분
-    """
     result = set()
     if not raw or str(raw).strip().lower() in ("nan", "none", ""):
         return result
@@ -96,58 +93,43 @@ def parse_extra_classes(raw: str) -> set:
         tok = tok.strip()
         if not tok:
             continue
-        # 범위 형식: 1-4~6
         range_m = re.match(r"^(\d+)-(\d+)~(\d+)$", tok)
         if range_m:
             g = int(range_m.group(1))
             for c in range(int(range_m.group(2)), int(range_m.group(3)) + 1):
                 result.add((g, c))
             continue
-        # 단일: 1-4
         single_m = _CLASS_PAT.match(tok.upper().replace(" ", ""))
         if single_m:
             result.add((int(single_m.group(1)), int(single_m.group(2))))
     return result
 
 
-# ──────────────────────────────────────────
-# 교사 목록 빌더
-# ──────────────────────────────────────────
-
-def build_teachers(df) -> list[Teacher]:
-    """pandas DataFrame → Teacher 목록"""
+def build_teachers(df, num_days: int = 10) -> list[Teacher]:
     teachers = []
     for _, row in df.iterrows():
         name = str(row.get("name", "")).strip()
         if not name:
             continue
-
         role_raw = str(row.get("role", "정부")).strip()
         role = "부만" if role_raw in ("부만", "부", "assistant_only") else "정부"
-
         try:
             priority = float(row.get("priority") or 1e9)
         except (ValueError, TypeError):
             priority = 1e9
 
         exc_t, exc_c, exc_tc = parse_exclude_rules(str(row.get("exclude", "")))
+        avail_exc = parse_available(str(row.get("available", "")), num_days)
+        exc_t = exc_t | avail_exc
         extra = parse_extra_classes(str(row.get("extra_classes", "")))
 
         teachers.append(Teacher(
-            name=name,
-            role=role,
-            priority=priority,
-            exclude_times=exc_t,
-            exclude_classes=exc_c,
-            exclude_time_class=exc_tc,
-            extra_classes=extra,
+            name=name, role=role, priority=priority,
+            exclude_times=exc_t, exclude_classes=exc_c,
+            exclude_time_class=exc_tc, extra_classes=extra,
         ))
     return teachers
 
-
-# ──────────────────────────────────────────
-# 배정 가능 여부 판단
-# ──────────────────────────────────────────
 
 def can_assign(t: Teacher, d: int, p: int, g: int, c: int) -> bool:
     if (d, p) in t.exclude_times:
@@ -159,58 +141,52 @@ def can_assign(t: Teacher, d: int, p: int, g: int, c: int) -> bool:
     return True
 
 
-# ──────────────────────────────────────────
-# 메인 배정 함수
-# ──────────────────────────────────────────
-
 def run_assignment(
     teachers: list[Teacher],
     num_days: int,
     num_grades: int,
     classes_per_grade: int,
-    periods_by_day_grade: list[list[int]],   # [day-1][grade-1] → int
-    prev_counts: Optional[dict] = None,       # {name: {"chief": n, "assistant": m}}
+    periods_by_day_grade: list[list[int]],
+    prev_counts: Optional[dict] = None,
 ) -> dict[tuple, dict[tuple, tuple]]:
-    """
-    Returns:
-        classroom_assignments[(d, p)][(g, c)] = (chief_name, assistant_name)
-    """
-
     if not teachers:
         return {}
 
-    # ── 누적 카운트 초기화 ──
     prev = prev_counts or {}
-    running_chief = {t.name: prev.get(t.name, {}).get("chief", 0) for t in teachers}
+    # 정/부 횟수 분리 관리
+    running_chief = {t.name: prev.get(t.name, {}).get("chief", 0)     for t in teachers}
     running_asst  = {t.name: prev.get(t.name, {}).get("assistant", 0) for t in teachers}
 
-    # ── 슬롯 정의 ──
     slots: list[tuple[int, int]] = []
     for d in range(1, num_days + 1):
-        max_p = max((int(periods_by_day_grade[d - 1][g - 1]) for g in range(1, num_grades + 1)), default=0)
+        max_p = max((int(periods_by_day_grade[d - 1][g - 1])
+                     for g in range(1, num_grades + 1)), default=0)
         for p in range(1, max_p + 1):
             slots.append((d, p))
 
-    # ── 정감독 가능 / 부감독 가능 목록 분리 ──
-    chief_eligible = [t for t in teachers if t.role == "정부"]
-    asst_eligible  = teachers  # 정부 + 부만 모두 부감독 가능
+    chief_pool = [t for t in teachers if t.role == "정부"]
+    asst_pool  = teachers  # 정부 + 부만 모두 부감독 가능
 
-    # ── 교사 정렬 키 (타이브레이크) ──
     orig_idx = {t.name: i for i, t in enumerate(teachers)}
-    _MAX_PRIO = 1e9
+    _MAX_P = 1e9
 
-    def sort_key_chief(t: Teacher):
-        # 총 감독 횟수 적은 사람 우선 → priority 큰(저우선) 사람 → 원 순서
-        prio_inv = min(t.priority, _MAX_PRIO)  # inf 방지
-        return (running_chief[t.name] + running_asst[t.name],
-                -prio_inv,
-                orig_idx[t.name])
+    def key_chief(t: Teacher, cnt: dict) -> tuple:
+        """정감독: 이 교시 정감독 횟수 → 누적 정감독 횟수 → priority → 원 순서"""
+        return (
+            cnt[t.name],
+            running_chief[t.name],
+            min(t.priority, _MAX_P),
+            orig_idx[t.name],
+        )
 
-    def sort_key_asst(t: Teacher):
-        prio_inv = min(t.priority, _MAX_PRIO)
-        return (running_chief[t.name] + running_asst[t.name],
-                -prio_inv,
-                orig_idx[t.name])
+    def key_asst(t: Teacher, cnt: dict) -> tuple:
+        """부감독: 이 교시 부감독 횟수 → 누적 부감독 횟수 → priority(학부모 우선) → 원 순서"""
+        return (
+            cnt[t.name],
+            running_asst[t.name],
+            min(t.priority, _MAX_P),
+            orig_idx[t.name],
+        )
 
     classroom_assignments: dict[tuple, dict[tuple, tuple]] = {}
 
@@ -219,35 +195,32 @@ def run_assignment(
             g for g in range(1, num_grades + 1)
             if int(periods_by_day_grade[d - 1][g - 1]) >= p
         ]
-        slot_taken: set[str] = set()
+        period_chief_cnt: dict[str, int] = defaultdict(int)
+        period_asst_cnt:  dict[str, int] = defaultdict(int)
         per_slot: dict[tuple, tuple] = {}
 
         for g in active_grades:
             for c in range(1, classes_per_grade + 1):
-                chief_name    = "(미배정)"
+                chief_name     = "(미배정)"
                 assistant_name = "(미배정)"
 
-                # ── 정감독 배정 ──
-                for t in sorted(chief_eligible, key=sort_key_chief):
-                    if t.name in slot_taken:
-                        continue
+                # 정감독 배정 (부만 제외)
+                for t in sorted(chief_pool, key=lambda t, cnt=period_chief_cnt: key_chief(t, cnt)):
                     if not can_assign(t, d, p, g, c):
                         continue
                     chief_name = t.name
-                    slot_taken.add(t.name)
+                    period_chief_cnt[t.name] += 1
                     running_chief[t.name] += 1
                     break
 
-                # ── 부감독 배정 ──
-                for t in sorted(asst_eligible, key=sort_key_asst):
-                    if t.name in slot_taken:
-                        continue
+                # 부감독 배정 (학부모 priority 낮으므로 먼저 들어옴)
+                for t in sorted(asst_pool, key=lambda t, cnt=period_asst_cnt: key_asst(t, cnt)):
                     if t.name == chief_name:
                         continue
                     if not can_assign(t, d, p, g, c):
                         continue
                     assistant_name = t.name
-                    slot_taken.add(t.name)
+                    period_asst_cnt[t.name] += 1
                     running_asst[t.name] += 1
                     break
 
@@ -258,18 +231,11 @@ def run_assignment(
     return classroom_assignments
 
 
-# ──────────────────────────────────────────
-# 통계 계산
-# ──────────────────────────────────────────
-
 def compute_stats(
     assignments: dict,
     teacher_list: list[Teacher],
     prev_counts: Optional[dict] = None,
 ) -> list[dict]:
-    """
-    각 교사별 정/부 횟수 집계 (이번 배정 + 이전 누적)
-    """
     prev = prev_counts or {}
     counts_chief: dict[str, int] = defaultdict(int)
     counts_asst:  dict[str, int] = defaultdict(int)
@@ -281,38 +247,32 @@ def compute_stats(
             if asst and asst != "(미배정)":
                 counts_asst[asst] += 1
 
-    rows = []
     all_names = sorted(
         {t.name for t in teacher_list}
         | set(counts_chief.keys())
         | set(counts_asst.keys())
     )
-
+    rows = []
     for name in all_names:
-        ch_prev  = prev.get(name, {}).get("chief", 0)
+        ch_prev   = prev.get(name, {}).get("chief", 0)
         asst_prev = prev.get(name, {}).get("assistant", 0)
-        ch_now   = counts_chief.get(name, 0)
-        asst_now = counts_asst.get(name, 0)
-        t_obj    = next((t for t in teacher_list if t.name == name), None)
+        ch_now    = counts_chief.get(name, 0)
+        asst_now  = counts_asst.get(name, 0)
+        t_obj     = next((t for t in teacher_list if t.name == name), None)
         rows.append({
-            "name":       name,
-            "role":       t_obj.role if t_obj else "정부",
-            "priority":   t_obj.priority if t_obj else None,
+            "name":        name,
+            "role":        t_obj.role     if t_obj else "정부",
+            "priority":    t_obj.priority if t_obj else None,
             "정감독(이전)": ch_prev,
             "정감독(금번)": ch_now,
             "정감독(합계)": ch_prev + ch_now,
             "부감독(이전)": asst_prev,
             "부감독(금번)": asst_now,
             "부감독(합계)": asst_prev + asst_now,
-            "총합계":      ch_prev + ch_now + asst_prev + asst_now,
+            "총합계":       ch_prev + ch_now + asst_prev + asst_now,
         })
-
     return rows
 
-
-# ──────────────────────────────────────────
-# 제외 위반 검사
-# ──────────────────────────────────────────
 
 def check_violations(
     assignments: dict,

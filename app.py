@@ -1,5 +1,5 @@
 # app.py
-# 시험 시감 자동 편성 v2
+# 시험 시감 자동 편성 v2.1
 # streamlit run app.py
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.title("🧮 시험 시감 자동 편성 v2")
+st.title("🧮 시험 시감 자동 편성 v2.1")
 st.caption(
     "날별 교사 명단 분리 · 정/부감독 전용 구분 · 특정 반 추가 배정 · "
     "누적 통계 · Supabase 공유 저장"

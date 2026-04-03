@@ -1,5 +1,5 @@
 # app.py
-# 시험 시감 자동 편성 v2.1
+# 시험 시감 자동 편성 v2.2
 # streamlit run app.py
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.title("🧮 시험 시감 자동 편성 v2.1")
+st.title("🧮 시험 시감 자동 편성 v2.2")
 st.caption(
     "날별 교사 명단 분리 · 정/부감독 전용 구분 · 특정 반 추가 배정 · "
     "누적 통계 · Supabase 공유 저장"
@@ -137,6 +137,7 @@ st.markdown("""
 | `exclude` | 제외 규칙 (세미콜론 구분) | `D1P2; 1-3; D2P1@2-4` |
 | `extra_classes` | 추가 감독 담당 반 | `1-4~6` 또는 `1-4,1-5` |
 | `priority` | 우선순위 (숫자, 작을수록 먼저) | `1` |
+| `available` | 가능한 날만 입력 (나머지 자동 제외) | `D1` / `D1;D3` |
 
 **제외 규칙 형식**:
 - `D1P2` → 1일차 2교시 전체
@@ -152,9 +153,10 @@ st.markdown("""
 sample_df = pd.DataFrame({
     "name": [f"교사{i:02d}" for i in range(1, 11)],
     "role": ["정부"] * 8 + ["부만"] * 2,
+    "available": ["", "", "", "", "", "", "", "", "D1", "D2"],
     "exclude": ["", "D1P2", "1-3", "D2P1@1-4", "", "", "", "", "", ""],
     "extra_classes": ["", "", "", "", "1-4~6", "", "", "", "", ""],
-    "priority": [1, 1, 2, 2, 3, 3, None, None, None, None],
+    "priority": [1, 1, 2, 2, 3, 3, None, None, 1, 1],
 })
 st.download_button(
     "📥 샘플 CSV 내려받기",
@@ -289,7 +291,7 @@ for d_idx, utab in enumerate(upload_tabs, start=1):
                 st.caption(f"✅ {len(df)}명 로드됨")
 
         # 열 보정
-        for col, default in [("role", "정부"), ("exclude", ""), ("extra_classes", ""), ("priority", None)]:
+        for col, default in [("role", "정부"), ("available", ""), ("exclude", ""), ("extra_classes", ""), ("priority", None)]:
             if col not in df.columns:
                 df[col] = default
 
@@ -343,7 +345,7 @@ if run_btn:
         if df is None or df.empty:
             day_teacher_lists.append([])
             continue
-        tlist = build_teachers(df)
+        tlist = build_teachers(df, num_days=num_days)
         day_teacher_lists.append(tlist)
         for t in tlist:
             if t.name not in seen_names:

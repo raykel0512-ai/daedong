@@ -1,5 +1,5 @@
-# scheduler.py — 시험 시감 자동 배정 알고리즘 v2.4
-# 변경사항: 연강 방지/제한 삭제, extra_classes를 기피 학급(Avoid)으로 변경
+# scheduler.py — 시험 시감 자동 배정 알고리즘 v2.5
+# 변경사항: extra_classes를 기피 학급(Avoid)으로 처리, 데이터 타입 안정성 강화
 
 from __future__ import annotations
 import re
@@ -15,7 +15,7 @@ class Teacher:
     exclude_times: set = field(default_factory=set)
     exclude_classes: set = field(default_factory=set)
     exclude_time_class: set = field(default_factory=set)
-    extra_classes: set = field(default_factory=set) # 기피 학급으로 사용
+    extra_classes: set = field(default_factory=set) # "기피 학급"으로 사용됨
 
 _CLASS_PAT = re.compile(r"^(?:C)?(\d+)-(\d+)$")
 _TIME_PAT  = re.compile(r"^D(\d+)P(\d+)$")
@@ -80,13 +80,13 @@ def build_teachers(df, num_days: int = 10) -> list[Teacher]:
         if not name: continue
         role_raw = str(row.get("role", "정부")).strip()
         role = "부만" if role_raw in ("부만", "부", "assistant_only") else "정부"
-        try: priority = float(row.get("priority", 1e9))
+        try: priority = float(row.get("priority", 1e9)) if pd.notnull(row.get("priority")) else 1e9
         except: priority = 1e9
         
         exc_t, exc_c, exc_tc = parse_exclude_rules(row.get("exclude", ""))
         avail_exc = parse_available(row.get("available", ""), num_days)
         exc_t |= avail_exc
-        extra = parse_extra_classes(row.get("extra_classes", "")) # 기피 학급 리스트
+        extra = parse_extra_classes(row.get("extra_classes", "")) # "기피 학급"
         
         teachers.append(Teacher(name=name, role=role, priority=priority, 
                                 exclude_times=exc_t, exclude_classes=exc_c, 
@@ -131,7 +131,6 @@ def run_assignment(
         for g in active_grades:
             for c in range(1, classes_per_grade + 1):
                 chief_name, assistant_name = "(미배정)", "(미배정)"
-                # 정감독 배정 (정렬: 현재 교시 배정여부 -> 누적 횟수 -> 우선순위)
                 sorted_chiefs = sorted(chief_pool, key=lambda t: (period_chief_cnt[t.name], running_chief[t.name], t.priority, orig_idx[t.name]))
                 for t in sorted_chiefs:
                     if can_assign(t, d, p, g, c):
@@ -139,7 +138,6 @@ def run_assignment(
                         period_chief_cnt[t.name] += 1
                         running_chief[t.name] += 1
                         break
-                # 부감독 배정
                 sorted_assts = sorted(asst_pool, key=lambda t: (period_asst_cnt[t.name], running_asst[t.name], t.priority, orig_idx[t.name]))
                 for t in sorted_assts:
                     if t.name != chief_name and can_assign(t, d, p, g, c):

@@ -1,4 +1,4 @@
-# scheduler.py — 시험 시감 자동 배정 알고리즘 v2.8
+# scheduler.py — 시험 시감 자동 배정 알고리즘 v2.9
 from __future__ import annotations
 import re
 import pandas as pd
@@ -14,7 +14,7 @@ class Teacher:
     exclude_times: set = field(default_factory=set)
     exclude_classes: set = field(default_factory=set)
     exclude_time_class: set = field(default_factory=set)
-    extra_classes: set = field(default_factory=set) 
+    extra_classes: set = field(default_factory=set) # 기피 학급
 
 _CLASS_PAT = re.compile(r"^(?:C)?(\d+)-(\d+)$")
 _TIME_PAT  = re.compile(r"^D(\d+)P(\d+)$")
@@ -100,51 +100,85 @@ def run_assignment(
     num_grades: int,
     classes_per_grade: int,
     periods_by_day_grade: list[list[int]],
-    prev_counts: Optional[dict] = None,
-    last_idx: int = 0
-) -> tuple[dict, dict, int]:
-    if not teachers: return {}, {}, 0
-    running_chief = prev_counts["chief"] if prev_counts else defaultdict(int)
-    running_asst = prev_counts["asst"] if prev_counts else defaultdict(int)
+) -> dict:
+    if not teachers: return {}
     
+    # 누적 횟수 및 상태 초기화
+    running_chief = defaultdict(int)
+    running_asst = defaultdict(int)
+    last_idx = 0
+    orig_idx_map = {t.name: i for i, t in enumerate(teachers)}
+    total_t = len(teachers)
+    
+    # 결과 저장용
+    classroom_assignments = {}
+
+    # 모든 교시 슬롯 생성
     slots = []
     for d in range(1, num_days + 1):
         max_p = max((int(periods_by_day_grade[d - 1][g - 1]) for g in range(1, num_grades + 1)), default=0)
-        for p in range(1, max_p + 1): slots.append((d, p))
+        for p in range(1, max_p + 1):
+            slots.append((d, p))
 
     chief_pool = [t for t in teachers if t.role == "교사"]
-    asst_pool = teachers
-    orig_idx_map = {t.name: i for i, t in enumerate(teachers)}
-    total_t = len(teachers)
-    classroom_assignments, current_last_idx = {}, last_idx
+    asst_pool = teachers # 학부모 포함
 
     for (d, p) in slots:
-        active_grades = [g for g in range(1, num_grades + 1) if int(periods_by_day_grade[d - 1][g - 1]) >= p]
-        period_chief_cnt, period_asst_cnt = defaultdict(int), defaultdict(int)
-        per_slot = {}
+        # 해당 교시에 시험을 치는 학년/반 리스트
+        active_slots = []
+        for g in range(1, num_grades + 1):
+            if int(periods_by_day_grade[d - 1][g - 1]) >= p:
+                for c in range(1, classes_per_grade + 1):
+                    active_slots.append((g, c))
+        
+        # ★ 중요: 해당 교시(d, p)에 이미 배정된 사람 이름 세트 (중복 방지)
+        assigned_in_this_period = set()
+        per_slot_results = {}
 
-        for g in active_grades:
-            for c in range(1, classes_per_grade + 1):
-                chief_name, assistant_name = "(미배정)", "(미배정)"
-                # 정감독 롤링 정렬
-                sorted_chiefs = sorted(chief_pool, key=lambda t: (period_chief_cnt[t.name], running_chief[t.name], (orig_idx_map[t.name] - current_last_idx) % total_t, t.priority))
-                for t in sorted_chiefs:
-                    if can_assign(t, d, p, g, c):
-                        chief_name, current_last_idx = t.name, orig_idx_map[t.name]
-                        period_chief_cnt[t.name] += 1
-                        running_chief[t.name] += 1
-                        break
-                # 부감독 롤링 정렬
-                sorted_assts = sorted(asst_pool, key=lambda t: (period_asst_cnt[t.name], 0 if t.role=="학부모" else 1, running_asst[t.name], (orig_idx_map[t.name] - current_last_idx) % total_t, t.priority))
-                for t in sorted_assts:
-                    if t.name != chief_name and can_assign(t, d, p, g, c):
-                        assistant_name, current_last_idx = t.name, orig_idx_map[t.name]
-                        period_asst_cnt[t.name] += 1
-                        running_asst[t.name] += 1
-                        break
-                per_slot[(g, c)] = (chief_name, assistant_name)
-        classroom_assignments[(d, p)] = per_slot
-    return classroom_assignments, {"chief": running_chief, "asst": running_asst}, current_last_idx
+        # 1. 정감독 우선 배정 (정감독 횟수 균형이 최우선)
+        for (g, c) in active_slots:
+            chief_name = "(미배정)"
+            # 정렬: 1.전체 정감독 횟수(적은순) 2.우선순위(작은순) 3.롤링순서
+            def key_chief(t: Teacher):
+                rolling_order = (orig_idx_map[t.name] - last_idx) % total_t
+                return (running_chief[t.name], t.priority, rolling_order)
+
+            sorted_chiefs = sorted(chief_pool, key=key_chief)
+            for t in sorted_chiefs:
+                if t.name in assigned_in_this_period: continue # 중복 투입 방지
+                if can_assign(t, d, p, g, c):
+                    chief_name = t.name
+                    running_chief[t.name] += 1
+                    assigned_in_this_period.add(t.name)
+                    last_idx = orig_idx_map[t.name]
+                    break
+            per_slot_results[(g, c)] = [chief_name, "(미배정)"]
+
+        # 2. 부감독 배정 (학부모 우선 + 정감독 횟수 적은 사람 우선)
+        for (g, c) in active_slots:
+            asst_name = "(미배정)"
+            chief_name = per_slot_results[(g, c)][0]
+            
+            # 정렬: 1.현재교시배정여부 2.역할(학부모0,교사1) 3.우선순위(학부모는 낮게 설정됨) 4.부감독 누적횟수
+            def key_asst(t: Teacher):
+                role_score = 0 if t.role == "학부모" else 1
+                rolling_order = (orig_idx_map[t.name] - last_idx) % total_t
+                return (role_score, running_asst[t.name], t.priority, rolling_order)
+
+            sorted_assts = sorted(asst_pool, key=key_asst)
+            for t in sorted_assts:
+                if t.name in assigned_in_this_period: continue # 중복 투입 방지
+                if can_assign(t, d, p, g, c):
+                    asst_name = t.name
+                    running_asst[t.name] += 1
+                    assigned_in_this_period.add(t.name)
+                    last_idx = orig_idx_map[t.name]
+                    break
+            per_slot_results[(g, c)][1] = asst_name
+
+        classroom_assignments[(d, p)] = {gc: tuple(pair) for gc, pair in per_slot_results.items()}
+
+    return classroom_assignments
 
 def compute_teacher_stats(assignments, teacher_list):
     c_chief, c_asst = defaultdict(int), defaultdict(int)
@@ -165,7 +199,6 @@ def compute_parent_stats(assignments, teacher_list, num_days):
             r = {"이름": t.name, "우선순위": t.priority if t.priority < 1e9 else "-"}
             tot = 0
             for d in range(1, num_days + 1):
-                cnt = daily[t.name][d]
-                r[f"{d}일차"] = f"{cnt}회"; tot += cnt
+                cnt = daily[t.name][d]; r[f"{d}일차"] = f"{cnt}회"; tot += cnt
             r["전체합계"] = tot; rows.append(r)
     return rows

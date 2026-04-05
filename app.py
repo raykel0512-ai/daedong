@@ -1,17 +1,14 @@
-# app.py — 시험 시감 자동 편성 v3.0
+# app.py — 시험 시감 자동 편성 v3.1
 import streamlit as st, pandas as pd, re
 from collections import defaultdict
 from io import BytesIO
 from scheduler import build_teachers, run_assignment, compute_teacher_stats, compute_parent_stats
 import db
 
-st.set_page_config(page_title="시험 시감 자동 편성 v3.0", layout="wide")
-st.title("🧮 시험 시감 자동 편성 v3.0")
-st.caption("중복 배정 차단 | 정감독 횟수 균형 | 탭 GID 완벽 반영")
+st.set_page_config(page_title="시험 시감 자동 편성 v3.1", layout="wide")
+st.title("🧮 시험 시감 자동 편성 v3.1")
+st.caption("중복 배정 철저 차단 | 학부모 정감독 배정 방지 | 롤링 알고리즘 최적화")
 
-# ══════════════════════════════════════════════════════════════
-# 사이드바 설정
-# ══════════════════════════════════════════════════════════════
 with st.sidebar:
     st.header("⚙️ 기본 설정")
     num_days = st.number_input("시험 일수", 1, 10, 4)
@@ -31,39 +28,34 @@ with st.sidebar:
     teacher_gid = st.text_input("교사 명단 탭 GID", "0")
     parent_gid = st.text_input("학부모 명단 탭 GID", "")
 
-# ══════════════════════════════════════════════════════════════
-# 데이터 로드 로직 (URL 정제)
-# ══════════════════════════════════════════════════════════════
 def get_clean_csv_url(url, gid):
     if not url: return None
-    # URL에서 스프레드시트 키값만 추출
     m = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url)
     if not m: return None
-    sheet_id = m.group(1)
-    # gid가 URL에 포함되어 있어도 무시하고 새로 붙임
-    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    return f"https://docs.google.com/spreadsheets/d/{m.group(1)}/export?format=csv&gid={gid}"
 
-@st.cache_data(ttl=60) # 1분마다 캐시 갱신
+@st.cache_data(ttl=60)
 def load_all_data(url, t_gid, p_gid):
     t_url = get_clean_csv_url(url, t_gid)
     p_url = get_clean_csv_url(url, p_gid) if p_gid else None
     
+    # 교사 데이터 로드 및 역할 강제
     t_df = pd.read_csv(t_url) if t_url else pd.DataFrame()
-    p_df = pd.read_csv(p_url) if p_url else pd.DataFrame()
+    if not t_df.empty:
+        t_df.columns = [c.strip().lower() for c in t_df.columns]
+        t_df['role'] = "교사" # 교사 탭 데이터는 무조건 교사로 강제
     
-    for df in [t_df, p_df]:
-        if not df.empty: df.columns = [c.strip().lower() for c in df.columns]
+    # 학부모 데이터 로드 및 역할 강제
+    p_df = pd.read_csv(p_url) if p_url else pd.DataFrame()
+    if not p_df.empty:
+        p_df.columns = [c.strip().lower() for c in p_df.columns]
+        p_df['role'] = "학부모" # 학부모 탭 데이터는 무조건 학부모로 강제
+    
     return t_df, p_df
 
-# ══════════════════════════════════════════════════════════════
-# 상태 관리
-# ══════════════════════════════════════════════════════════════
 if "assignments" not in st.session_state: st.session_state["assignments"] = {}
 if "all_teachers" not in st.session_state: st.session_state["all_teachers"] = []
 
-# ══════════════════════════════════════════════════════════════
-# ① 데이터 로드 및 확인
-# ══════════════════════════════════════════════════════════════
 st.markdown("---")
 st.subheader("① 명단 데이터 확인")
 
@@ -71,25 +63,21 @@ if raw_sheet_url:
     t_df, p_df = load_all_data(raw_sheet_url, teacher_gid, parent_gid)
     c1, c2 = st.columns(2)
     with c1:
-        st.write("👨‍🏫 **교사 명단**")
+        st.write("👨‍🏫 **교사 명단** (정감독 가능)")
         if not t_df.empty:
-            for col, val in [("role","교사"), ("available",""), ("exclude",""), ("extra_classes",""), ("priority",None)]:
+            for col, val in [("available",""), ("exclude",""), ("extra_classes",""), ("priority",None)]:
                 if col not in t_df.columns: t_df[col] = val
             st.dataframe(t_df, height=200)
     with c2:
-        st.write("👥 **학부모 명단**")
+        st.write("👥 **학부모 명단** (부감독 전용)")
         if not p_df.empty:
-            for col, val in [("role","학부모"), ("available",""), ("exclude",""), ("extra_classes",""), ("priority",None)]:
+            for col, val in [("available",""), ("exclude",""), ("extra_classes",""), ("priority",None)]:
                 if col not in p_df.columns: p_df[col] = val
             st.dataframe(p_df, height=200)
-        else: st.info("학부모 GID를 입력하면 데이터를 불러옵니다.")
 
-# ══════════════════════════════════════════════════════════════
-# ② 자동 배정
-# ══════════════════════════════════════════════════════════════
 st.markdown("---")
 st.subheader("② 자동 배정 실행")
-if st.button("🚀 배정 시작 (중복 차단 및 횟수 균형 반영)", type="primary", use_container_width=True):
+if st.button("🚀 배정 시작", type="primary", use_container_width=True):
     if raw_sheet_url and not t_df.empty:
         combined = pd.concat([t_df, p_df], ignore_index=True)
         teachers = build_teachers(combined, num_days=num_days)
@@ -98,15 +86,11 @@ if st.button("🚀 배정 시작 (중복 차단 및 횟수 균형 반영)", type
         st.success("배정이 완료되었습니다!")
     else: st.error("교사 명단을 먼저 불러와주세요.")
 
-# ══════════════════════════════════════════════════════════════
-# ③ 결과 출력 및 수동 수정
-# ══════════════════════════════════════════════════════════════
 asgn = st.session_state.get("assignments", {})
-if asgn and isinstance(asgn, dict):
+if asgn:
     st.markdown("---")
     st.subheader("③ 결과 확인 및 수동 수정")
     v_tabs = st.tabs([f"{d}일차" for d in range(1, num_days + 1)] + ["📊 통계"])
-    
     for d in range(1, num_days + 1):
         with v_tabs[d-1]:
             for g in range(1, num_grades + 1):
@@ -147,4 +131,4 @@ if asgn and isinstance(asgn, dict):
     with pd.ExcelWriter(buf, engine='xlsxwriter') as wr:
         pd.DataFrame(compute_teacher_stats(asgn, st.session_state["all_teachers"])).to_excel(wr, sheet_name='교사', index=False)
         pd.DataFrame(compute_parent_stats(asgn, st.session_state["all_teachers"], num_days)).to_excel(wr, sheet_name='학부모', index=False)
-    st.download_button("📥 엑셀 다운로드", buf.getvalue(), "schedule_v30.xlsx")
+    st.download_button("📥 엑셀 다운로드", buf.getvalue(), "schedule_v31.xlsx")

@@ -6,8 +6,8 @@ from scheduler import build_teachers, run_assignment, compute_teacher_stats, com
 import db
 
 st.set_page_config(page_title="시험 시감 자동 편성 v3.3 ", layout="wide")
-st.title("🧮 시험 시감 자동 편성 v3.3 | 백지연쌤 화이팅! 👍👍")
-st.caption("교사: 제외(Exclude) 방식 | 학부모: 가능날(Available) 방식 | 롤링 배정 시스템")
+st.title("🧮 시험 시감 자동 편성 v3.3 ")
+st.caption("교사: 제외(Exclude) 방식 | 학부모: 가능날(Available) 방식 | 롤링 배정 시스템  |  백지연쌤 화이팅! 👍👍")
 
 # ══════════════════════════════════════════════════════════════
 # 사이드바 설정

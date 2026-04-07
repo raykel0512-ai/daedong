@@ -1,4 +1,4 @@
-# scheduler.py — 시험 시감 자동 배정 알고리즘 v3.7
+# scheduler.py — 시험 시감 자동 배정 알고리즘 v3.8
 from __future__ import annotations
 import re
 import pandas as pd
@@ -101,13 +101,10 @@ def can_assign(t: Teacher, d: int, p: int, g: int, c: int) -> bool:
 def run_assignment(teachers: list[Teacher], num_days, num_grades, classes_per_grade, periods_by_day_grade) -> dict:
     if not teachers: return {}
     
-    running_chief = defaultdict(int)
-    running_asst = defaultdict(int)
+    running_chief, running_asst = defaultdict(int), defaultdict(int)
     parent_daily_asst = defaultdict(lambda: defaultdict(int))
-    
     last_idx, total_t = 0, len(teachers)
     orig_idx_map = {t.name: i for i, t in enumerate(teachers)}
-    
     chief_pool = [t for t in teachers if t.role == "교사"]
     asst_pool = teachers
 
@@ -122,12 +119,10 @@ def run_assignment(teachers: list[Teacher], num_days, num_grades, classes_per_gr
         active_slots = [(g, c) for g in range(1, num_grades + 1) for c in range(1, classes_per_grade + 1) if int(periods_by_day_grade[d - 1][g - 1]) >= p]
         per_slot, period_assigned = {}, set()
 
-        # 1. 정감독 배정 (우선순위 반영 균등 배정)
+        # 1. 정감독 배정
         for (g, c) in active_slots:
             ch_name = "(미배정)"
-            # 정렬 기준: 1.정감독 횟수 2.우선순위(번호작은순) 3.롤링 순서
             sorted_chiefs = sorted(chief_pool, key=lambda t: (running_chief[t.name], t.priority, (orig_idx_map[t.name] - last_idx) % total_t))
-            
             for t in sorted_chiefs:
                 if t.name in period_assigned: continue
                 if not can_assign(t, d, p, g, c): continue
@@ -141,14 +136,20 @@ def run_assignment(teachers: list[Teacher], num_days, num_grades, classes_per_gr
         # 2. 부감독 배정
         for (g, c) in active_slots:
             ch_name, as_name = per_slot[(g, c)][0], "(미배정)"
-            # 정렬 기준: 1.역할(학부모우선) 2.하루 2회미만 학부모 3.누적 횟수 4.롤링
+            
+            # 직전 교시(p-1)에 이 반(g,c)의 부감독이었던 사람 확인 (섞기 강화)
+            prev_asst_in_this_class = "(없음)"
+            if p > 1 and (d, p-1) in classroom_assignments:
+                prev_asst_in_this_class = classroom_assignments[(d, p-1)].get((g, c), (None, "(미배정)"))[1]
+
             def asst_key(t: Teacher):
+                # 직전 교시 똑같은 반 부감독이면 후순위로 미룸 (패널티 100점)
+                penalty = 1 if t.name == prev_asst_in_this_class else 0
                 if t.role == "학부모":
                     u2 = 0 if parent_daily_asst[t.name][d] < 2 else 1
-                    return (0, u2, running_asst[t.name], (orig_idx_map[t.name] - last_idx) % total_t)
+                    return (0, u2, penalty, running_asst[t.name], (orig_idx_map[t.name] - last_idx) % total_t)
                 else:
-                    # 교사는 정감독+부감독 총합 균등 목표
-                    return (1, 0, running_chief[t.name] + running_asst[t.name], (orig_idx_map[t.name] - last_idx) % total_t)
+                    return (1, 0, penalty, running_chief[t.name] + running_asst[t.name], (orig_idx_map[t.name] - last_idx) % total_t)
 
             sorted_assts = sorted(asst_pool, key=asst_key)
             for t in sorted_assts:

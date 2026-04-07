@@ -1,13 +1,12 @@
-# app.py — 시험 시감 자동 편성 v3.5
+# app.py — 시험 시감 자동 편성 v3.7
 import streamlit as st, pandas as pd, re
 from collections import defaultdict
 from io import BytesIO
 from scheduler import build_teachers, run_assignment, compute_teacher_stats, compute_parent_stats
-import db
 
-st.set_page_config(page_title="시험 시감 자동 편성 v3.5", layout="wide")
-st.title("🧮 시험 시감 자동 편성 v3.5")
-st.caption("교사: 제외(Exclude) 방식 | 학부모: 가능날(Available) 방식 | 롤링 배정 시스템 | 백지연쌤 화이팅! 👍👍")
+st.set_page_config(page_title="시험 시감 자동 편성 v3.7", layout="wide")
+st.title("🧮 시험 시감 자동 편성 v3.7")
+st.caption("v3.7: 우선순위 기반 정감독 균등 배정 로직 최적화 (4회 vs 3회)")
 
 # ══════════════════════════════════════════════════════════════
 # 사이드바 설정

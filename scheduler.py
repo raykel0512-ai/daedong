@@ -1,4 +1,4 @@
-# scheduler.py — 시험 시감 자동 배정 알고리즘 v4.0
+# scheduler.py — 시험 시감 자동 배정 알고리즘 v4.1
 from __future__ import annotations
 import re
 import pandas as pd
@@ -16,52 +16,71 @@ class Teacher:
     exclude_time_class: set = field(default_factory=set)
     extra_classes: set = field(default_factory=set)
 
-# --- 파싱 및 빌더 로직 ---
+_CLASS_PAT = re.compile(r"^(?:C)?(\d+)-(\d+)$")
+_TIME_PAT  = re.compile(r"^D(\d+)P(\d+)$")
+_DAY_PAT   = re.compile(r"^D(\d+)$")
+
 def parse_exclude_rules(raw: str, max_p: int = 10) -> tuple[set, set, set]:
     exc_t, exc_c, exc_tc = set(), set(), set()
     raw_str = str(raw).strip().upper().replace(" ", "")
-    if not raw_str or raw_str.lower() in ("nan", "none", ""): return exc_t, exc_c, exc_tc
+    if not raw_str or raw_str.lower() in ("nan", "none", ""): 
+        return exc_t, exc_c, exc_tc
     for tok in raw_str.split(";"):
         if not tok: continue
         if "@" in tok:
             parts = tok.split("@", 1)
-            m_t, m_c = _TIME_PAT.match(parts[0]), _CLASS_PAT.match(parts[1])
-            if m_t and m_c: exc_tc.add((int(m_t.group(1)), int(m_t.group(2)), int(m_c.group(1)), int(m_c.group(2))))
+            m_t = _TIME_PAT.match(parts[0])
+            m_c = _CLASS_PAT.match(parts[1])
+            if m_t and m_c:
+                exc_tc.add((int(m_t.group(1)), int(m_t.group(2)), int(m_c.group(1)), int(m_c.group(2))))
         else:
-            m_tp, m_d, m_c = _TIME_PAT.match(tok), _DAY_PAT.match(tok), _CLASS_PAT.match(tok)
-            if m_tp: exc_t.add((int(m_tp.group(1)), int(m_tp.group(2))))
+            m_tp = _TIME_PAT.match(tok)
+            m_d  = _DAY_PAT.match(tok)
+            m_c  = _CLASS_PAT.match(tok)
+            if m_tp:
+                exc_t.add((int(m_tp.group(1)), int(m_tp.group(2))))
             elif m_d:
                 d_num = int(m_d.group(1))
-                for p in range(1, max_p + 1): exc_t.add((d_num, p))
-            elif m_c: exc_c.add((int(m_c.group(1)), int(m_c.group(2))))
+                for p in range(1, max_p + 1):
+                    exc_t.add((d_num, p))
+            elif m_c:
+                exc_c.add((int(m_c.group(1)), int(m_c.group(2))))
     return exc_t, exc_c, exc_tc
 
 def parse_available_to_exclude(raw: str, num_days: int, max_p: int = 10) -> set:
     raw_str = str(raw).strip().upper().replace(" ", "")
-    if not raw_str or raw_str.lower() in ("nan", "none", ""): return set()
+    if not raw_str or raw_str.lower() in ("nan", "none", ""): 
+        return set()
     available = set()
     for tok in raw_str.split(";"):
         if not tok: continue
-        m_tp, m_d = _TIME_PAT.match(tok), _DAY_PAT.match(tok)
-        if m_tp: available.add((int(m_tp.group(1)), int(m_tp.group(2))))
+        m_tp = _TIME_PAT.match(tok)
+        m_d  = _DAY_PAT.match(tok)
+        if m_tp:
+            available.add((int(m_tp.group(1)), int(m_tp.group(2))))
         elif m_d:
             d_num = int(m_d.group(1))
-            for p in range(1, max_p + 1): available.add((d_num, p))
+            for p in range(1, max_p + 1):
+                available.add((d_num, p))
     all_slots = {(d, p) for d in range(1, num_days + 1) for p in range(1, max_p + 1)}
     return all_slots - available
 
 def parse_extra_classes(raw: str) -> set:
     result = set()
     raw_str = str(raw).strip()
-    if not raw_str or raw_str.lower() in ("nan", "none", ""): return result
+    if not raw_str or raw_str.lower() in ("nan", "none", ""): 
+        return result
     for tok in re.split(r"[;,]", raw_str):
         tok = tok.strip()
         range_m = re.match(r"^(\d+)-(\d+)~(\d+)$", tok)
         if range_m:
-            g = int(range_m.group(1)); [result.add((g, c)) for c in range(int(range_m.group(2)), int(range_m.group(3)) + 1)]
+            g = int(range_m.group(1))
+            for c in range(int(range_m.group(2)), int(range_m.group(3)) + 1):
+                result.add((g, c))
             continue
         single_m = _CLASS_PAT.match(tok.upper().replace(" ", ""))
-        if single_m: result.add((int(single_m.group(1)), int(single_m.group(2))))
+        if single_m:
+            result.add((int(single_m.group(1)), int(single_m.group(2))))
     return result
 
 def build_teachers(t_df, p_df, num_days: int = 10) -> list[Teacher]:
@@ -84,7 +103,8 @@ def build_teachers(t_df, p_df, num_days: int = 10) -> list[Teacher]:
             exc_t = parse_available_to_exclude(row.get("available", ""), num_days)
             extra = parse_extra_classes(row.get("extra_classes", ""))
             try:
-                raw_p = row.get("priority"); prio = int(float(raw_p)) if pd.notnull(raw_p) else 999
+                raw_p = row.get("priority")
+                prio = int(float(raw_p)) if pd.notnull(raw_p) else 999
             except: prio = 999
             teachers.append(Teacher(name=name, role="학부모", priority=prio, exclude_times=exc_t, extra_classes=extra))
     return teachers
@@ -96,7 +116,6 @@ def can_assign(t: Teacher, d: int, p: int, g: int, c: int) -> bool:
     if (g, c) in t.extra_classes: return False
     return True
 
-# --- 메인 알고리즘 ---
 def run_assignment(teachers: list[Teacher], num_days, num_grades, classes_per_grade, periods_by_day_grade) -> dict:
     if not teachers: return {}
     running_chief, running_asst = defaultdict(int), defaultdict(int)
@@ -116,19 +135,21 @@ def run_assignment(teachers: list[Teacher], num_days, num_grades, classes_per_gr
         active_slots = [(g, c) for g in range(1, num_grades + 1) for c in range(1, classes_per_grade + 1) if int(periods_by_day_grade[d - 1][g - 1]) >= p]
         period_assigned, per_slot = set(), {}
 
-        # 1. 정감독
         for (g, c) in active_slots:
             ch_name = "(미배정)"
             sorted_ch = sorted(chief_pool, key=lambda t: (running_chief[t.name], t.priority, (orig_idx_map[t.name] - last_idx) % total_t))
             for t in sorted_ch:
                 if t.name in period_assigned: continue
                 if not can_assign(t, d, p, g, c): continue
-                ch_name = t.name; running_chief[t.name] += 1; period_assigned.add(t.name); last_idx = (orig_idx_map[t.name] + 1) % total_t; break
+                ch_name = t.name
+                running_chief[t.name] += 1
+                period_assigned.add(t.name)
+                last_idx = (orig_idx_map[t.name] + 1) % total_t
+                break
             per_slot[(g, c)] = [ch_name, "(미배정)"]
 
-        # 2. 부감독
         for (g, c) in active_slots:
-            ch_name, as_name = per_slot[(g, c)][0], "(미배정)"
+            as_name = "(미배정)"
             prev_asst = classroom_assignments.get((d, p-1), {}).get((g, c), (None, "(미배정)"))[1] if p > 1 else "(없음)"
             def as_key(t):
                 pen = 1 if t.name == prev_asst else 0
@@ -141,15 +162,19 @@ def run_assignment(teachers: list[Teacher], num_days, num_grades, classes_per_gr
             sorted_as = sorted(asst_pool, key=as_key)
             for t in sorted_as:
                 if t.name in period_assigned: continue
-                if t.name == ch_name: continue
+                if t.name == per_slot[(g, c)][0]: continue
                 if not can_assign(t, d, p, g, c): continue
                 if t.role == "학부모" and parent_daily_asst[t.name][d] >= 2: continue
-                as_name = t.name; running_asst[t.name] += 1; period_assigned.add(t.name); last_idx = (orig_idx_map[t.name] + 1) % total_t; if t.role == "학부모": parent_daily_asst[t.name][d] += 1; break
+                as_name = t.name
+                running_asst[t.name] += 1
+                period_assigned.add(t.name)
+                last_idx = (orig_idx_map[t.name] + 1) % total_t
+                if t.role == "학부모": parent_daily_asst[t.name][d] += 1
+                break
             per_slot[(g, c)][1] = as_name
         classroom_assignments[(d, p)] = {gc: tuple(v) for gc, v in per_slot.items()}
     return classroom_assignments
 
-# --- 통계 및 데이터 변환 ---
 def compute_teacher_stats(assignments, teacher_list):
     c_chief, c_asst = defaultdict(int), defaultdict(int)
     for ps in assignments.values():
@@ -158,7 +183,8 @@ def compute_teacher_stats(assignments, teacher_list):
             if ass != "(미배정)": c_asst[ass] += 1
     rows = []
     for t in teacher_list:
-        if t.role == "교사": rows.append({"이름": t.name, "우선순위": t.priority if t.priority < 999 else "-", "정감독": c_chief[t.name], "부감독": c_asst[t.name], "합계": c_chief[t.name] + c_asst[t.name]})
+        if t.role == "교사":
+            rows.append({"이름": t.name, "우선순위": t.priority if t.priority < 999 else "-", "정감독": c_chief[t.name], "부감독": c_asst[t.name], "합계": c_chief[t.name] + c_asst[t.name]})
     return sorted(rows, key=lambda x: (x["우선순위"] if isinstance(x["우선순위"], int) else 999, -x["정감독"]))
 
 def compute_parent_stats(assignments, teacher_list, num_days):
@@ -170,12 +196,12 @@ def compute_parent_stats(assignments, teacher_list, num_days):
     for t in teacher_list:
         if t.role == "학부모":
             r = {"이름": t.name, "합계": sum(daily[t.name].values())}
-            for d in range(1, num_days + 1): r[f"{d}일차"] = f"{daily[t.name][d]}회"
+            for d in range(1, num_days + 1):
+                r[f"{d}일차"] = f"{daily[t.name][d]}회"
             rows.append(r)
     return rows
 
 def assignments_to_df(assignments: dict) -> pd.DataFrame:
-    """1~4일차 모든 시간표 정보를 저장용 데이터프레임으로 변환"""
     data = []
     for (d, p), slots in assignments.items():
         for (g, c), (chief, asst) in slots.items():
@@ -183,7 +209,6 @@ def assignments_to_df(assignments: dict) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 def df_to_assignments(df: pd.DataFrame) -> dict:
-    """저장된 데이터프레임을 다시 앱의 시간표(dict) 구조로 복원"""
     assignments = {}
     for _, row in df.iterrows():
         d, p, g, c = int(row['day']), int(row['period']), int(row['grade']), int(row['class'])

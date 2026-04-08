@@ -1,5 +1,5 @@
-streamlit>=1.35.0
-pandas>=2.0.0
-xlsxwriter>=3.1.0
-supabase>=2.4.0
-pip install streamlit pandas xlsxwriter gspread google-auth
+streamlit
+pandas
+xlsxwriter
+gspread
+google-auth

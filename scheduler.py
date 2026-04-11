@@ -1,4 +1,4 @@
-# scheduler.py — 시험 시감 자동 배정 알고리즘 v4.3
+# scheduler.py — 시험 시감 자동 배정 알고리즘 v4.4
 from __future__ import annotations
 import re
 import pandas as pd
@@ -15,7 +15,7 @@ class Teacher:
     exclude_classes: set = field(default_factory=set)
     exclude_time_class: set = field(default_factory=set)
     extra_classes: set = field(default_factory=set)
-    specific_excludes: set = field(default_factory=set) # 복도감독 판별용 (P단위 제외)
+    specific_excludes: set = field(default_factory=set) # 복도감독(특정 교시 제외) 표시용
 
 _CLASS_PAT = re.compile(r"^(?:C)?(\d+)-(\d+)$")
 _TIME_PAT  = re.compile(r"^D(\d+)P(\d+)$")
@@ -36,7 +36,7 @@ def parse_exclude_rules(raw: str, max_p: int = 10) -> tuple[set, set, set, set]:
             if m_tp:
                 d_val, p_val = int(m_tp.group(1)), int(m_tp.group(2))
                 exc_t.add((d_val, p_val))
-                spec_t.add((d_val, p_val)) # 특정 교시 제외는 복도감독 후보
+                spec_t.add((d_val, p_val)) 
             elif m_d:
                 d_n = int(m_d.group(1))
                 for p in range(1, max_p + 1): exc_t.add((d_n, p))
@@ -112,17 +112,14 @@ def run_assignment(teachers: list[Teacher], num_days, num_grades, classes_per_gr
     orig_idx_map = {t.name: i for i, t in enumerate(teachers)}
     chief_pool = [t for t in teachers if t.role == "교사"]
     asst_pool = teachers
-
     slots = []
     for d in range(1, num_days + 1):
         max_p = max((int(periods_by_day_grade[d - 1][g - 1]) for g in range(1, num_grades + 1)), default=0)
         for p in range(1, max_p + 1): slots.append((d, p))
-
     classroom_assignments = {}
     for (d, p) in slots:
         active_slots = [(g, c) for g in range(1, num_grades + 1) for c in range(1, classes_per_grade + 1) if int(periods_by_day_grade[d - 1][g - 1]) >= p]
         period_assigned, per_slot = set(), {}
-
         for (g, c) in active_slots:
             ch_name = "(미배정)"
             sorted_ch = sorted(chief_pool, key=lambda t: (running_chief[t.name], t.priority, (orig_idx_map[t.name] - last_idx) % total_t))
@@ -131,7 +128,6 @@ def run_assignment(teachers: list[Teacher], num_days, num_grades, classes_per_gr
                 if not can_assign(t, d, p, g, c): continue
                 ch_name = t.name; running_chief[t.name] += 1; period_assigned.add(t.name); last_idx = (orig_idx_map[t.name] + 1) % total_t; break
             per_slot[(g, c)] = [ch_name, "(미배정)"]
-
         for (g, c) in active_slots:
             as_name = "(미배정)"
             prev_asst = classroom_assignments.get((d, p-1), {}).get((g, c), (None, "(미배정)"))[1] if p > 1 else "(없음)"
@@ -160,10 +156,8 @@ def compute_teacher_stats(assignments, teacher_list):
     all_names_in_table = set()
     for ps in assignments.values():
         for ch, ass in ps.values():
-            if ch != "(미배정)": 
-                c_chief[ch] += 1; all_names_in_table.add(ch)
-            if ass != "(미배정)": 
-                c_asst[ass] += 1; all_names_in_table.add(ass)
+            if ch != "(미배정)": c_chief[ch] += 1; all_names_in_table.add(ch)
+            if ass != "(미배정)": c_asst[ass] += 1; all_names_in_table.add(ass)
     parent_names = {t.name for t in teacher_list if t.role == "학부모"}
     teacher_map = {t.name: t for t in teacher_list if t.role == "교사"}
     rows = []

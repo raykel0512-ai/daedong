@@ -1,4 +1,4 @@
-# app.py — 시험 시감 자동 편성 v4.5
+# app.py — 시험 시감 자동 편성 v4.6
 import streamlit as st, pandas as pd, re, json
 from collections import defaultdict
 from io import BytesIO
@@ -9,9 +9,9 @@ from scheduler import (
     compute_parent_stats, assignments_to_df, df_to_assignments
 )
 
-st.set_page_config(page_title="시험 시감 자동 편성 v4.5", layout="wide")
-st.title("🧮 시험 시감 자동 편성 v4.5")
-st.caption("백지연쌤 화이팅! 💪 | 명단 로드 즉시 복도감독 표시 | 실시간 위반 검증")
+st.set_page_config(page_title="시험 시감 자동 편성 v4.6", layout="wide")
+st.title("🧮 시험 시감 자동 편성 v4.6")
+st.caption("백지연쌤 화이팅! 💪 | 명단 로드 즉시 복도감독 표시 | 수동 입력 자동 집계")
 
 def get_gspread_client():
     try:
@@ -65,7 +65,6 @@ st.subheader("① 명단 데이터 불러오기")
 if st.button("🔄 시트에서 명단 새로고침", use_container_width=True):
     t_df, p_df = load_all_data(raw_sheet_url, teacher_gid, parent_gid)
     st.session_state["t_df"], st.session_state["p_df"] = t_df, p_df
-    # 명단 로드 즉시 Teacher 객체 리스트 생성 (복도감독 표시용)
     st.session_state["all_teachers"] = build_teachers(t_df, p_df, num_days=num_days)
     st.success("명단을 최신 상태로 불러왔습니다!")
 
@@ -100,7 +99,7 @@ with col_save:
                 except: ws = sh.add_worksheet(title=save_tab_name, rows="1000", cols="10")
                 df_save = assignments_to_df(st.session_state["assignments"])
                 ws.clear(); ws.update([df_save.columns.values.tolist()] + df_save.values.tolist())
-                st.success("시간표가 저장되었습니다!")
+                st.success("시간표 정보가 저장되었습니다!")
             except Exception as e: st.error(f"저장 실패: {e}")
 
 with col_load:
@@ -111,7 +110,6 @@ with col_load:
                 sh = client.open_by_url(raw_sheet_url); ws = sh.worksheet(save_tab_name)
                 df_load = pd.DataFrame(ws.get_all_records())
                 st.session_state["assignments"] = df_to_assignments(df_load)
-                # 불러온 후 통계를 위해 명단 다시 빌드
                 st.session_state["all_teachers"] = build_teachers(t_df, p_df, num_days=num_days)
                 st.success("시간표를 복원했습니다!")
             except: st.error("저장된 데이터를 찾을 수 없습니다.")
@@ -125,30 +123,25 @@ if asgn:
             d_max_p = max(int(periods_by_day_grade[d-1][g-1]) for g in range(1, num_grades+1))
             for p in range(1, d_max_p + 1):
                 col_tbl, col_corridor = st.columns([4, 1])
-                # 복도감독 리스트 추출
                 corridor_list = [t.name for t in st.session_state["all_teachers"] if hasattr(t, 'specific_excludes') and (d, p) in t.specific_excludes]
-                
                 with col_corridor:
                     st.markdown(f"**🚶 복도감독 ({p}교시)**")
                     if corridor_list:
                         for c_name in corridor_list: st.write(f"- {c_name}")
                     else: st.caption("없음")
-                
                 with col_tbl:
                     st.markdown(f"#### 📌 {p}교시")
-                    current_period_names = []
+                    curr_names = []
                     for g in range(1, num_grades + 1):
                         if int(periods_by_day_grade[d-1][g-1]) < p: continue
                         for c in range(1, classes_per_grade + 1):
                             pair = asgn.get((d, p), {}).get((g, c), ("(미배정)", "(미배정)"))
-                            if pair[0] != "(미배정)": current_period_names.append(pair[0])
-                            if pair[1] != "(미배정)": current_period_names.append(pair[1])
-                    
-                    dupes = set([n for n in current_period_names if current_period_names.count(n) > 1])
-                    confs = set([n for n in current_period_names if n in corridor_list])
+                            if pair[0] != "(미배정)": curr_names.append(pair[0])
+                            if pair[1] != "(미배정)": curr_names.append(pair[1])
+                    dupes = set([n for n in curr_names if curr_names.count(n) > 1])
+                    confs = set([n for n in curr_names if n in corridor_list])
                     if dupes: st.error(f"⚠️ 중복 배정: {', '.join(dupes)}")
                     if confs: st.error(f"⚠️ 복도감독 충돌: {', '.join(confs)}")
-
                     for g in range(1, num_grades + 1):
                         if int(periods_by_day_grade[d-1][g-1]) < p: continue
                         cols = [f"{g}-{c}반" for c in range(1, classes_per_grade + 1)]
@@ -190,8 +183,11 @@ if asgn:
                 ws.merge_range(row_i, 0, row_i, classes_per_grade, f"[{p}교시]", f_p); row_i += 1
                 for g in range(1, num_grades + 1):
                     if int(periods_by_day_grade[d-1][g-1]) < p: continue
-                    ws.write(row_i, 0, f"{g}학년", f_h); [ws.write(row_i, c, f"{g}-{c}반", f_h) for c in range(1, classes_per_grade + 1)]; row_i += 1
-                    ws.write(row_i, 0, "정감독", f_h); slot_p = asgn.get((d, p), {})
+                    ws.write(row_i, 0, f"{g}학년", f_h)
+                    for c in range(1, classes_per_grade + 1):
+                        ws.write(row_i, c, f"{g}-{c}반", f_h)
+                        ws.set_column(c, c, 10)
+                    row_i += 1; ws.write(row_i, 0, "정감독", f_h); slot_p = asgn.get((d, p), {})
                     for c in range(1, classes_per_grade + 1):
                         name_ch = slot_p.get((g, c), ("(미배정)", ""))[0]
                         ws.write(row_i, c, name_ch, f_m if name_ch == "(미배정)" else f_c)
@@ -201,4 +197,4 @@ if asgn:
                         ws.write(row_i, c, name_as, f_m if name_as == "(미배정)" else f_a)
                     row_i += 2
                 row_i += 1
-    st.download_button("📥 Excel 다운로드", buf.getvalue(), f"schedule_v45.xlsx", use_container_width=True)
+    st.download_button("📥 Excel 다운로드", buf.getvalue(), f"schedule_v46.xlsx", use_container_width=True)

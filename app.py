@@ -1,4 +1,4 @@
-# app.py — 시험 시감 자동 편성 v4.4
+# app.py — 시험 시감 자동 편성 v4.5
 import streamlit as st, pandas as pd, re, json
 from collections import defaultdict
 from io import BytesIO
@@ -9,9 +9,9 @@ from scheduler import (
     compute_parent_stats, assignments_to_df, df_to_assignments
 )
 
-st.set_page_config(page_title="시험 시감 자동 편성 v4.4", layout="wide")
-st.title("🧮 시험 시감 자동 편성 v4.4")
-st.caption("백지연쌤 화이팅! 💪 | 복도감독 표시 & 실시간 위반 검증 시스템 완비")
+st.set_page_config(page_title="시험 시감 자동 편성 v4.5", layout="wide")
+st.title("🧮 시험 시감 자동 편성 v4.5")
+st.caption("백지연쌤 화이팅! 💪 | 명단 로드 즉시 복도감독 표시 | 실시간 위반 검증")
 
 def get_gspread_client():
     try:
@@ -65,8 +65,8 @@ st.subheader("① 명단 데이터 불러오기")
 if st.button("🔄 시트에서 명단 새로고침", use_container_width=True):
     t_df, p_df = load_all_data(raw_sheet_url, teacher_gid, parent_gid)
     st.session_state["t_df"], st.session_state["p_df"] = t_df, p_df
-    # AttributeError 방지를 위해 기존 Teacher 세션 삭제
-    st.session_state["all_teachers"] = []
+    # 명단 로드 즉시 Teacher 객체 리스트 생성 (복도감독 표시용)
+    st.session_state["all_teachers"] = build_teachers(t_df, p_df, num_days=num_days)
     st.success("명단을 최신 상태로 불러왔습니다!")
 
 t_df = st.session_state.get("t_df", pd.DataFrame())
@@ -88,7 +88,7 @@ with col_run:
             st.session_state["assignments"] = run_assignment(teachers, num_days, num_grades, classes_per_grade, periods_by_day_grade)
             st.session_state["all_teachers"] = teachers
             st.success("배정 완료!")
-        else: st.error("교사 명단을 먼저 확인해 주세요.")
+        else: st.error("교사 명단을 먼저 불러와주세요.")
 
 with col_save:
     if st.button("☁️ 시트에 시간표 저장", use_container_width=True):
@@ -100,7 +100,7 @@ with col_save:
                 except: ws = sh.add_worksheet(title=save_tab_name, rows="1000", cols="10")
                 df_save = assignments_to_df(st.session_state["assignments"])
                 ws.clear(); ws.update([df_save.columns.values.tolist()] + df_save.values.tolist())
-                st.success("시간표 정보가 저장되었습니다!")
+                st.success("시간표가 저장되었습니다!")
             except Exception as e: st.error(f"저장 실패: {e}")
 
 with col_load:
@@ -111,7 +111,7 @@ with col_load:
                 sh = client.open_by_url(raw_sheet_url); ws = sh.worksheet(save_tab_name)
                 df_load = pd.DataFrame(ws.get_all_records())
                 st.session_state["assignments"] = df_to_assignments(df_load)
-                # 데이터 복구 시 Teacher 객체도 다시 생성
+                # 불러온 후 통계를 위해 명단 다시 빌드
                 st.session_state["all_teachers"] = build_teachers(t_df, p_df, num_days=num_days)
                 st.success("시간표를 복원했습니다!")
             except: st.error("저장된 데이터를 찾을 수 없습니다.")
@@ -125,11 +125,8 @@ if asgn:
             d_max_p = max(int(periods_by_day_grade[d-1][g-1]) for g in range(1, num_grades+1))
             for p in range(1, d_max_p + 1):
                 col_tbl, col_corridor = st.columns([4, 1])
-                
-                # 복도감독 리스트 추출 (AttributeError 방지 로직 포함)
-                corridor_list = []
-                if st.session_state["all_teachers"]:
-                    corridor_list = [t.name for t in st.session_state["all_teachers"] if hasattr(t, 'specific_excludes') and (d, p) in t.specific_excludes]
+                # 복도감독 리스트 추출
+                corridor_list = [t.name for t in st.session_state["all_teachers"] if hasattr(t, 'specific_excludes') and (d, p) in t.specific_excludes]
                 
                 with col_corridor:
                     st.markdown(f"**🚶 복도감독 ({p}교시)**")
@@ -204,4 +201,4 @@ if asgn:
                         ws.write(row_i, c, name_as, f_m if name_as == "(미배정)" else f_a)
                     row_i += 2
                 row_i += 1
-    st.download_button("📥 Excel 다운로드", buf.getvalue(), "schedule_v44.xlsx", use_container_width=True)
+    st.download_button("📥 Excel 다운로드", buf.getvalue(), f"schedule_v45.xlsx", use_container_width=True)

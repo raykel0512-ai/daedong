@@ -1,4 +1,4 @@
-# scheduler.py — 시험 시감 자동 배정 알고리즘 v4.4
+# scheduler.py — 시험 시감 자동 배정 알고리즘 v4.5
 from __future__ import annotations
 import re
 import pandas as pd
@@ -15,7 +15,7 @@ class Teacher:
     exclude_classes: set = field(default_factory=set)
     exclude_time_class: set = field(default_factory=set)
     extra_classes: set = field(default_factory=set)
-    specific_excludes: set = field(default_factory=set) # 복도감독(특정 교시 제외) 표시용
+    specific_excludes: set = field(default_factory=set) # 복도감독용
 
 _CLASS_PAT = re.compile(r"^(?:C)?(\d+)-(\d+)$")
 _TIME_PAT  = re.compile(r"^D(\d+)P(\d+)$")
@@ -35,13 +35,11 @@ def parse_exclude_rules(raw: str, max_p: int = 10) -> tuple[set, set, set, set]:
             m_tp, m_d, m_c = _TIME_PAT.match(tok), _DAY_PAT.match(tok), _CLASS_PAT.match(tok)
             if m_tp:
                 d_val, p_val = int(m_tp.group(1)), int(m_tp.group(2))
-                exc_t.add((d_val, p_val))
-                spec_t.add((d_val, p_val)) 
+                exc_t.add((d_val, p_val)); spec_t.add((d_val, p_val))
             elif m_d:
                 d_n = int(m_d.group(1))
                 for p in range(1, max_p + 1): exc_t.add((d_n, p))
-            elif m_c:
-                exc_c.add((int(m_c.group(1)), int(m_c.group(2))))
+            elif m_c: exc_c.add((int(m_c.group(1)), int(m_c.group(2))))
     return exc_t, exc_c, exc_tc, spec_t
 
 def parse_available_to_exclude(raw: str, num_days: int, max_p: int = 10) -> set:
@@ -80,9 +78,7 @@ def build_teachers(t_df, p_df, num_days: int = 10) -> list[Teacher]:
             if not name: continue
             exc_t, exc_c, exc_tc, spec_t = parse_exclude_rules(row.get("exclude", ""))
             extra = parse_extra_classes(row.get("extra_classes", ""))
-            try:
-                raw_p = row.get("priority")
-                prio = int(float(raw_p)) if pd.notnull(raw_p) else 999
+            try: prio = int(float(row.get("priority"))) if pd.notnull(row.get("priority")) else 999
             except: prio = 999
             teachers.append(Teacher(name=name, role="교사", priority=prio, exclude_times=exc_t, exclude_classes=exc_c, exclude_time_class=exc_tc, extra_classes=extra, specific_excludes=spec_t))
     if not p_df.empty:
@@ -91,8 +87,7 @@ def build_teachers(t_df, p_df, num_days: int = 10) -> list[Teacher]:
             if not name: continue
             exc_t = parse_available_to_exclude(row.get("available", ""), num_days)
             extra = parse_extra_classes(row.get("extra_classes", ""))
-            try:
-                raw_p = row.get("priority"); prio = int(float(raw_p)) if pd.notnull(raw_p) else 999
+            try: prio = int(float(row.get("priority"))) if pd.notnull(row.get("priority")) else 999
             except: prio = 999
             teachers.append(Teacher(name=name, role="학부모", priority=prio, exclude_times=exc_t, extra_classes=extra))
     return teachers

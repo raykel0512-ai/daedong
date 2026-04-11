@@ -1,4 +1,4 @@
-# app.py — 시험 시감 자동 편성 v4.6
+# app.py — 시험 시감 자동 편성 v4.7
 import streamlit as st, pandas as pd, re, json
 from collections import defaultdict
 from io import BytesIO
@@ -9,9 +9,9 @@ from scheduler import (
     compute_parent_stats, assignments_to_df, df_to_assignments
 )
 
-st.set_page_config(page_title="시험 시감 자동 편성 v4.6", layout="wide")
-st.title("🧮 시험 시감 자동 편성 v4.6")
-st.caption("백지연쌤 화이팅! 💪 | 명단 로드 즉시 복도감독 표시 | 수동 입력 자동 집계")
+st.set_page_config(page_title="시험 시감 자동 편성 v4.7", layout="wide")
+st.title("🧮 시험 시감 자동 편성 v4.7")
+st.caption("백지연쌤 화이팅! 💪 | 복도감독 통계 합산 | 엑셀 통계 시트 포함")
 
 def get_gspread_client():
     try:
@@ -166,16 +166,24 @@ if asgn:
                                     asgn[(d, p)][(g, c_n)] = tuple(pair)
                                 except: continue
                 st.markdown("---")
+    
     with day_tabs[-1]:
         all_t = st.session_state.get("all_teachers", [])
-        st.write("### 교사 통계 (수동 입력 포함)"); st.dataframe(pd.DataFrame(compute_teacher_stats(asgn, all_t)), use_container_width=True)
-        st.write("### 학부모 현황"); st.dataframe(pd.DataFrame(compute_parent_stats(asgn, all_t, num_days)), use_container_width=True)
+        st.write("### 교사 통계 (수동 입력 & 복도감독 포함)")
+        df_t_stats = pd.DataFrame(compute_teacher_stats(asgn, all_t))
+        st.dataframe(df_t_stats, use_container_width=True)
+        
+        st.write("### 학부모 현황")
+        df_p_stats = pd.DataFrame(compute_parent_stats(asgn, all_t, num_days))
+        st.dataframe(df_p_stats, use_container_width=True)
 
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
         wb = writer.book; f_h = wb.add_format({"bold":True,"bg_color":"#4472C4","font_color":"white","border":1,"align":"center"})
         f_c = wb.add_format({"bg_color":"#DDEEFF","border":1,"align":"center"}); f_a = wb.add_format({"bg_color":"#EEFFDD","border":1,"align":"center"})
         f_m = wb.add_format({"bg_color":"#FFDDDD","font_color":"#999999","border":1,"align":"center"}); f_p = wb.add_format({"bold":True,"bg_color":"#F2F2F2","border":1})
+        
+        # 날짜별 시트
         for d in range(1, num_days + 1):
             ws = wb.add_worksheet(f"{d}일차"); ws.set_column(0, 0, 15); row_i = 0
             d_max_p = max(int(periods_by_day_grade[d-1][g-1]) for g in range(1, num_grades+1))
@@ -197,4 +205,9 @@ if asgn:
                         ws.write(row_i, c, name_as, f_m if name_as == "(미배정)" else f_a)
                     row_i += 2
                 row_i += 1
-    st.download_button("📥 Excel 다운로드", buf.getvalue(), f"schedule_v46.xlsx", use_container_width=True)
+        
+        # 통계 시트 추가
+        if not df_t_stats.empty: df_t_stats.to_excel(writer, sheet_name="교사통계", index=False)
+        if not df_p_stats.empty: df_p_stats.to_excel(writer, sheet_name="학부모현황", index=False)
+
+    st.download_button("📥 Excel 다운로드 (통계 포함)", buf.getvalue(), f"schedule_v47.xlsx", use_container_width=True)

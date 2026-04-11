@@ -1,4 +1,4 @@
-# scheduler.py — 시험 시감 자동 배정 알고리즘 v4.5
+# scheduler.py — 시험 시감 자동 배정 알고리즘 v4.6
 from __future__ import annotations
 import re
 import pandas as pd
@@ -39,7 +39,8 @@ def parse_exclude_rules(raw: str, max_p: int = 10) -> tuple[set, set, set, set]:
             elif m_d:
                 d_n = int(m_d.group(1))
                 for p in range(1, max_p + 1): exc_t.add((d_n, p))
-            elif m_c: exc_c.add((int(m_c.group(1)), int(m_c.group(2))))
+            elif m_c:
+                exc_c.add((int(m_c.group(1)), int(m_c.group(2))))
     return exc_t, exc_c, exc_tc, spec_t
 
 def parse_available_to_exclude(raw: str, num_days: int, max_p: int = 10) -> set:

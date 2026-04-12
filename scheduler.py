@@ -1,4 +1,4 @@
-# scheduler.py — 시험 시감 자동 배정 알고리즘 v4.9
+# scheduler.py — 시험 시감 자동 배정 알고리즘 v5.0
 from __future__ import annotations
 import re
 import pandas as pd

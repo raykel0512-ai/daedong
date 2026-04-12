@@ -1,4 +1,4 @@
-# scheduler.py — 시험 시감 자동 배정 알고리즘 v4.8
+# scheduler.py — 시험 시감 자동 배정 알고리즘 v4.9
 from __future__ import annotations
 import re
 import pandas as pd
@@ -14,7 +14,7 @@ class Teacher:
     exclude_times: set = field(default_factory=set)
     exclude_classes: set = field(default_factory=set)
     exclude_time_class: set = field(default_factory=set)
-    extra_classes: set = field(default_factory=set) # 기피 학급으로 활용
+    extra_classes: set = field(default_factory=set) 
     specific_excludes: set = field(default_factory=set) # 복도감독용
 
 _CLASS_PAT = re.compile(r"^(?:C)?(\d+)-(\d+)$")

@@ -1,4 +1,4 @@
-# app.py — 시험 시감 자동 편성 v4.9
+# app.py — 시험 시감 자동 편성 v5.0
 import streamlit as st, pandas as pd, re, json
 from collections import defaultdict
 from io import BytesIO
@@ -9,10 +9,13 @@ from scheduler import (
     compute_parent_stats, assignments_to_df, df_to_assignments
 )
 
-st.set_page_config(page_title="시험 시감 자동 편성 v4.9", layout="wide")
-st.title("🧮 시험 시감 자동 편성 v4.9")
-st.caption("백지연쌤 화이팅! 💪 | 실시간 위반 검증 및 깔끔한 엑셀 출력")
+st.set_page_config(page_title="시험 시감 자동 편성 v5.0", layout="wide")
+st.title("🧮 시험 시감 자동 편성 v5.0")
+st.caption("백지연쌤 화이팅! 💪 | 공유 메모장 | 실시간 위반 검증 | 클라우드 저장")
 
+# ══════════════════════════════════════════════════════════════
+# 구글 시트 API 클라이언트
+# ══════════════════════════════════════════════════════════════
 def get_gspread_client():
     try:
         if "gcp_service_account" in st.secrets:
@@ -24,6 +27,9 @@ def get_gspread_client():
         return gspread.authorize(creds)
     except: return None
 
+# ══════════════════════════════════════════════════════════════
+# 사이드바 설정
+# ══════════════════════════════════════════════════════════════
 with st.sidebar:
     st.header("⚙️ 기본 설정")
     num_days = int(st.number_input("시험 일수", 1, 10, 4))
@@ -40,7 +46,52 @@ with st.sidebar:
     teacher_gid = st.text_input("교사 명단 GID", "0")
     parent_gid = st.text_input("학부모 명단 GID", "")
     save_tab_name = st.text_input("저장용 탭 이름", "저장데이터")
+    memo_tab_name = st.text_input("메모장 탭 이름", "메모장")
 
+# ══════════════════════════════════════════════════════════════
+# 메모장 저장/로드 로직
+# ══════════════════════════════════════════════════════════════
+def save_memo(url, tab_name, text):
+    client = get_gspread_client()
+    if not client: return
+    try:
+        sh = client.open_by_url(url)
+        try: ws = sh.worksheet(tab_name)
+        except: ws = sh.add_worksheet(title=tab_name, rows="10", cols="2")
+        ws.update('A1', [[text]])
+        st.success("메모가 클라우드에 저장되었습니다!")
+    except Exception as e: st.error(f"메모 저장 실패: {e}")
+
+def load_memo(url, tab_name):
+    client = get_gspread_client()
+    if not client: return ""
+    try:
+        sh = client.open_by_url(url); ws = sh.worksheet(tab_name)
+        return ws.acell('A1').value
+    except: return ""
+
+# ══════════════════════════════════════════════════════════════
+# 공유 메모장 (최상단 배치)
+# ══════════════════════════════════════════════════════════════
+st.markdown("### 📝 공유 메모장")
+if "memo_text" not in st.session_state: st.session_state["memo_text"] = ""
+
+m_col1, m_col2 = st.columns([5, 1])
+with m_col1:
+    memo_input = st.text_area("공유할 내용을 적으세요 (엔터로 줄바꿈 가능)", value=st.session_state["memo_text"], height=100)
+with m_col2:
+    st.write("") # 간격 조절
+    if st.button("💾 메모 저장", use_container_width=True):
+        save_memo(raw_sheet_url, memo_tab_name, memo_input)
+        st.session_state["memo_text"] = memo_input
+    if st.button("🔄 메모 불러오기", use_container_width=True):
+        loaded_memo = load_memo(raw_sheet_url, memo_tab_name)
+        st.session_state["memo_text"] = loaded_memo
+        st.rerun()
+
+# ══════════════════════════════════════════════════════════════
+# 명단 로드 및 배정 로직
+# ══════════════════════════════════════════════════════════════
 def get_csv_url(url, gid):
     if not url or not gid: return None
     m = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url)
@@ -61,12 +112,11 @@ if "assignments" not in st.session_state: st.session_state["assignments"] = {}
 if "all_teachers" not in st.session_state: st.session_state["all_teachers"] = []
 
 st.markdown("---")
-st.subheader("① 명단 데이터 불러오기")
 if st.button("🔄 시트에서 명단 새로고침", use_container_width=True):
     t_df_new, p_df_new = load_all_data(raw_sheet_url, teacher_gid, parent_gid)
     st.session_state["t_df"], st.session_state["p_df"] = t_df_new, p_df_new
     st.session_state["all_teachers"] = build_teachers(t_df_new, p_df_new, num_days=num_days)
-    st.success("명단을 최신 상태로 불러왔습니다!")
+    st.success("명단을 불러왔습니다!")
 
 t_df = st.session_state.get("t_df", pd.DataFrame())
 p_df = st.session_state.get("p_df", pd.DataFrame())
@@ -87,10 +137,9 @@ with col_run:
             st.session_state["assignments"] = run_assignment(teachers, num_days, num_grades, classes_per_grade, periods_by_day_grade)
             st.session_state["all_teachers"] = teachers
             st.success("배정 완료!")
-        else: st.error("교사 명단을 먼저 확인해 주세요.")
 
 with col_save:
-    if st.button("☁️ 시트에 시간표 저장", use_container_width=True):
+    if st.button("☁️ 배정결과 시트저장", use_container_width=True):
         client = get_gspread_client()
         if client and st.session_state["assignments"]:
             try:
@@ -99,11 +148,11 @@ with col_save:
                 except: ws = sh.add_worksheet(title=save_tab_name, rows="1000", cols="10")
                 df_save = assignments_to_df(st.session_state["assignments"])
                 ws.clear(); ws.update([df_save.columns.values.tolist()] + df_save.values.tolist())
-                st.success("시간표 정보가 저장되었습니다!")
+                st.success("배정 결과가 저장되었습니다!")
             except Exception as e: st.error(f"저장 실패: {e}")
 
 with col_load:
-    if st.button("📂 저장된 시간표 불러오기", use_container_width=True):
+    if st.button("📂 배정결과 불러오기", use_container_width=True):
         client = get_gspread_client()
         if client:
             try:
@@ -111,9 +160,12 @@ with col_load:
                 df_load = pd.DataFrame(ws.get_all_records())
                 st.session_state["assignments"] = df_to_assignments(df_load)
                 st.session_state["all_teachers"] = build_teachers(t_df, p_df, num_days=num_days)
-                st.success("시간표를 복원했습니다!")
+                st.success("배정 결과를 복원했습니다!")
             except: st.error("저장된 데이터를 찾을 수 없습니다.")
 
+# ══════════════════════════════════════════════════════════════
+# 결과 확인 및 실시간 검증
+# ══════════════════════════════════════════════════════════════
 asgn = st.session_state.get("assignments", {})
 if asgn:
     st.markdown("---")
@@ -138,19 +190,14 @@ if asgn:
                     for g in range(1, num_grades + 1):
                         if int(periods_by_day_grade[d-1][g-1]) < p: continue
                         for c in range(1, classes_per_grade + 1):
-                            ch, ass = asgn.get((d, p), {}).get((g, c), ("(미배정)", "(미배정)"))
-                            if ch != "(미배정)": 
-                                curr_names.append(ch)
-                                if ch in teacher_info_map:
-                                    t_obj = teacher_info_map[ch]
-                                    if (g, c) in t_obj.exclude_classes or (g, c) in t_obj.extra_classes:
-                                        class_conflicts.append(f"{ch}({g}-{c} 기피)")
-                            if ass != "(미배정)": 
-                                curr_names.append(ass)
-                                if ass in teacher_info_map:
-                                    t_obj = teacher_info_map[ass]
-                                    if (g, c) in t_obj.exclude_classes or (g, c) in t_obj.extra_classes:
-                                        class_conflicts.append(f"{ass}({g}-{c} 기피)")
+                            pair = asgn.get((d, p), {}).get((g, c), ("(미배정)", "(미배정)"))
+                            for i, name in enumerate(pair):
+                                if name != "(미배정)":
+                                    curr_names.append(name)
+                                    if name in teacher_info_map:
+                                        t_obj = teacher_info_map[name]
+                                        if (g, c) in t_obj.exclude_classes or (g, c) in t_obj.extra_classes:
+                                            class_conflicts.append(f"{name}({g}-{c} 기피)")
                     dupes = set([n for n in curr_names if curr_names.count(n) > 1])
                     confs = set([n for n in curr_names if n in corridor_list])
                     if dupes: st.error(f"⚠️ 중복 배정: {', '.join(dupes)}")
@@ -163,10 +210,8 @@ if asgn:
                         slot = asgn.get((d, p), {})
                         for c in range(1, classes_per_grade + 1):
                             pair = slot.get((g, c), ("(미배정)", "(미배정)"))
-                            df_view_ch = pair[0] if pair[0] != "(미배정)" else ""
-                            df_view_as = pair[1] if pair[1] != "(미배정)" else ""
-                            df_v.loc["정감독", f"{g}-{c}반"] = df_view_ch
-                            df_v.loc["부감독", f"{g}-{c}반"] = df_view_as
+                            df_v.loc["정감독", f"{g}-{c}반"] = pair[0] if pair[0] != "(미배정)" else ""
+                            df_v.loc["부감독", f"{g}-{c}반"] = pair[1] if pair[1] != "(미배정)" else ""
                         st.write(f"**{g}학년**")
                         edited = st.data_editor(df_v, key=f"ed_{d}_{p}_{g}", use_container_width=True)
                         for row_l, row_v in edited.iterrows():
@@ -220,4 +265,4 @@ if asgn:
                 row_i += 1
         if not df_t_stats.empty: df_t_stats.to_excel(writer, sheet_name="교사통계", index=False)
         if not df_p_stats.empty: df_p_stats.to_excel(writer, sheet_name="학부모현황", index=False)
-    st.download_button("📥 Excel 다운로드 (통계 포함)", buf.getvalue(), f"schedule_final.xlsx", use_container_width=True)
+    st.download_button("📥 Excel 다운로드", buf.getvalue(), f"schedule_final.xlsx", use_container_width=True)

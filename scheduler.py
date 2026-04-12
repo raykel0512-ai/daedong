@@ -1,4 +1,4 @@
-# scheduler.py — 시험 시감 자동 배정 알고리즘 v4.7
+# scheduler.py — 시험 시감 자동 배정 알고리즘 v4.8
 from __future__ import annotations
 import re
 import pandas as pd
@@ -14,7 +14,7 @@ class Teacher:
     exclude_times: set = field(default_factory=set)
     exclude_classes: set = field(default_factory=set)
     exclude_time_class: set = field(default_factory=set)
-    extra_classes: set = field(default_factory=set)
+    extra_classes: set = field(default_factory=set) # 기피 학급으로 활용
     specific_excludes: set = field(default_factory=set) # 복도감독용
 
 _CLASS_PAT = re.compile(r"^(?:C)?(\d+)-(\d+)$")
@@ -156,26 +156,15 @@ def compute_teacher_stats(assignments, teacher_list):
             if ass != "(미배정)": c_asst[ass] += 1; all_names_in_table.add(ass)
     parent_names = {t.name for t in teacher_list if t.role == "학부모"}
     teacher_map = {t.name: t for t in teacher_list if t.role == "교사"}
-    
-    # 교사 리스트에 있는 이름들도 명단에 추가 (배정 안 됐더라도 복도감독 있을 수 있음)
     for t in teacher_list:
         if t.role == "교사": all_names_in_table.add(t.name)
-        
     rows = []
     for name in sorted(all_names_in_table):
         if name in parent_names: continue
         t_obj = teacher_map.get(name)
         prio = t_obj.priority if t_obj and t_obj.priority < 999 else "-"
         corridor_count = len(t_obj.specific_excludes) if t_obj else 0
-        
-        rows.append({
-            "이름": name,
-            "우선순위": prio,
-            "정감독": c_chief[name],
-            "부감독": c_asst[name],
-            "복도감독": corridor_count,
-            "합계": c_chief[name] + c_asst[name] + corridor_count
-        })
+        rows.append({"이름": name, "우선순위": prio, "정감독": c_chief[name], "부감독": c_asst[name], "복도감독": corridor_count, "합계": c_chief[name] + c_asst[name] + corridor_count})
     return sorted(rows, key=lambda x: (str(x["우선순위"]) if x["우선순위"] != "-" else "999", -x["정감독"]))
 
 def compute_parent_stats(assignments, teacher_list, num_days):

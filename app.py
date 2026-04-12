@@ -1,4 +1,4 @@
-# app.py — 시험 시감 자동 편성 v4.7
+# app.py — 시험 시감 자동 편성 v4.8
 import streamlit as st, pandas as pd, re, json
 from collections import defaultdict
 from io import BytesIO
@@ -9,9 +9,9 @@ from scheduler import (
     compute_parent_stats, assignments_to_df, df_to_assignments
 )
 
-st.set_page_config(page_title="시험 시감 자동 편성 v4.7", layout="wide")
-st.title("🧮 시험 시감 자동 편성 v4.7")
-st.caption("백지연쌤 화이팅! 💪 | 복도감독 통계 합산 | 엑셀 통계 시트 포함")
+st.set_page_config(page_title="시험 시감 자동 편성 v4.8", layout="wide")
+st.title("🧮 시험 시감 자동 편성 v4.8")
+st.caption("백지연쌤 화이팅! 💪 | 수동 수정 실시간 위반 검증 (기피학급 포함)")
 
 def get_gspread_client():
     try:
@@ -63,9 +63,9 @@ if "all_teachers" not in st.session_state: st.session_state["all_teachers"] = []
 st.markdown("---")
 st.subheader("① 명단 데이터 불러오기")
 if st.button("🔄 시트에서 명단 새로고침", use_container_width=True):
-    t_df, p_df = load_all_data(raw_sheet_url, teacher_gid, parent_gid)
-    st.session_state["t_df"], st.session_state["p_df"] = t_df, p_df
-    st.session_state["all_teachers"] = build_teachers(t_df, p_df, num_days=num_days)
+    t_df_new, p_df_new = load_all_data(raw_sheet_url, teacher_gid, parent_gid)
+    st.session_state["t_df"], st.session_state["p_df"] = t_df_new, p_df_new
+    st.session_state["all_teachers"] = build_teachers(t_df_new, p_df_new, num_days=num_days)
     st.success("명단을 최신 상태로 불러왔습니다!")
 
 t_df = st.session_state.get("t_df", pd.DataFrame())
@@ -87,7 +87,6 @@ with col_run:
             st.session_state["assignments"] = run_assignment(teachers, num_days, num_grades, classes_per_grade, periods_by_day_grade)
             st.session_state["all_teachers"] = teachers
             st.success("배정 완료!")
-        else: st.error("교사 명단을 먼저 불러와주세요.")
 
 with col_save:
     if st.button("☁️ 시트에 시간표 저장", use_container_width=True):
@@ -118,30 +117,57 @@ asgn = st.session_state.get("assignments", {})
 if asgn:
     st.markdown("---")
     day_tabs = st.tabs([f"{d}일차" for d in range(1, num_days + 1)] + ["📊 통계"])
+    
+    # 교사 정보를 빠르게 찾기 위한 맵 생성
+    teacher_info_map = {t.name: t for t in st.session_state["all_teachers"]}
+
     for d in range(1, num_days + 1):
         with day_tabs[d-1]:
             d_max_p = max(int(periods_by_day_grade[d-1][g-1]) for g in range(1, num_grades+1))
             for p in range(1, d_max_p + 1):
                 col_tbl, col_corridor = st.columns([4, 1])
                 corridor_list = [t.name for t in st.session_state["all_teachers"] if hasattr(t, 'specific_excludes') and (d, p) in t.specific_excludes]
+                
                 with col_corridor:
                     st.markdown(f"**🚶 복도감독 ({p}교시)**")
                     if corridor_list:
                         for c_name in corridor_list: st.write(f"- {c_name}")
                     else: st.caption("없음")
+                
                 with col_tbl:
                     st.markdown(f"#### 📌 {p}교시")
+                    
+                    # --- 실시간 위반 검증 로직 (중복, 복도충돌, 기피학급충돌) ---
                     curr_names = []
+                    class_conflicts = [] # 기피학급 위반 저장
+                    
                     for g in range(1, num_grades + 1):
                         if int(periods_by_day_grade[d-1][g-1]) < p: continue
                         for c in range(1, classes_per_grade + 1):
-                            pair = asgn.get((d, p), {}).get((g, c), ("(미배정)", "(미배정)"))
-                            if pair[0] != "(미배정)": curr_names.append(pair[0])
-                            if pair[1] != "(미배정)": curr_names.append(pair[1])
+                            ch, ass = asgn.get((d, p), {}).get((g, c), ("(미배정)", "(미배정)"))
+                            # 정감독 체크
+                            if ch != "(미배정)": 
+                                curr_names.append(ch)
+                                if ch in teacher_info_map:
+                                    t_obj = teacher_info_map[ch]
+                                    # exclude_classes 나 extra_classes(기피)에 현재 (g,c)가 있는지 확인
+                                    if (g, c) in t_obj.exclude_classes or (g, c) in t_obj.extra_classes:
+                                        class_conflicts.append(f"{ch}({g}-{c} 기피)")
+                            # 부감독 체크
+                            if ass != "(미배정)": 
+                                curr_names.append(ass)
+                                if ass in teacher_info_map:
+                                    t_obj = teacher_info_map[ass]
+                                    if (g, c) in t_obj.exclude_classes or (g, c) in t_obj.extra_classes:
+                                        class_conflicts.append(f"{ass}({g}-{c} 기피)")
+                    
                     dupes = set([n for n in curr_names if curr_names.count(n) > 1])
                     confs = set([n for n in curr_names if n in corridor_list])
+                    
                     if dupes: st.error(f"⚠️ 중복 배정: {', '.join(dupes)}")
                     if confs: st.error(f"⚠️ 복도감독 충돌: {', '.join(confs)}")
+                    if class_conflicts: st.error(f"⚠️ 기피학급 위반: {', '.join(set(class_conflicts))}")
+
                     for g in range(1, num_grades + 1):
                         if int(periods_by_day_grade[d-1][g-1]) < p: continue
                         cols = [f"{g}-{c}반" for c in range(1, classes_per_grade + 1)]
@@ -172,7 +198,6 @@ if asgn:
         st.write("### 교사 통계 (수동 입력 & 복도감독 포함)")
         df_t_stats = pd.DataFrame(compute_teacher_stats(asgn, all_t))
         st.dataframe(df_t_stats, use_container_width=True)
-        
         st.write("### 학부모 현황")
         df_p_stats = pd.DataFrame(compute_parent_stats(asgn, all_t, num_days))
         st.dataframe(df_p_stats, use_container_width=True)
@@ -182,8 +207,6 @@ if asgn:
         wb = writer.book; f_h = wb.add_format({"bold":True,"bg_color":"#4472C4","font_color":"white","border":1,"align":"center"})
         f_c = wb.add_format({"bg_color":"#DDEEFF","border":1,"align":"center"}); f_a = wb.add_format({"bg_color":"#EEFFDD","border":1,"align":"center"})
         f_m = wb.add_format({"bg_color":"#FFDDDD","font_color":"#999999","border":1,"align":"center"}); f_p = wb.add_format({"bold":True,"bg_color":"#F2F2F2","border":1})
-        
-        # 날짜별 시트
         for d in range(1, num_days + 1):
             ws = wb.add_worksheet(f"{d}일차"); ws.set_column(0, 0, 15); row_i = 0
             d_max_p = max(int(periods_by_day_grade[d-1][g-1]) for g in range(1, num_grades+1))
@@ -191,11 +214,8 @@ if asgn:
                 ws.merge_range(row_i, 0, row_i, classes_per_grade, f"[{p}교시]", f_p); row_i += 1
                 for g in range(1, num_grades + 1):
                     if int(periods_by_day_grade[d-1][g-1]) < p: continue
-                    ws.write(row_i, 0, f"{g}학년", f_h)
-                    for c in range(1, classes_per_grade + 1):
-                        ws.write(row_i, c, f"{g}-{c}반", f_h)
-                        ws.set_column(c, c, 10)
-                    row_i += 1; ws.write(row_i, 0, "정감독", f_h); slot_p = asgn.get((d, p), {})
+                    ws.write(row_i, 0, f"{g}학년", f_h); [ws.write(row_i, c, f"{g}-{c}반", f_h) for c in range(1, classes_per_grade + 1)]; row_i += 1
+                    ws.write(row_i, 0, "정감독", f_h); slot_p = asgn.get((d, p), {})
                     for c in range(1, classes_per_grade + 1):
                         name_ch = slot_p.get((g, c), ("(미배정)", ""))[0]
                         ws.write(row_i, c, name_ch, f_m if name_ch == "(미배정)" else f_c)
@@ -205,9 +225,6 @@ if asgn:
                         ws.write(row_i, c, name_as, f_m if name_as == "(미배정)" else f_a)
                     row_i += 2
                 row_i += 1
-        
-        # 통계 시트 추가
         if not df_t_stats.empty: df_t_stats.to_excel(writer, sheet_name="교사통계", index=False)
         if not df_p_stats.empty: df_p_stats.to_excel(writer, sheet_name="학부모현황", index=False)
-
-    st.download_button("📥 Excel 다운로드 (통계 포함)", buf.getvalue(), f"schedule_v47.xlsx", use_container_width=True)
+    st.download_button("📥 Excel 다운로드", buf.getvalue(), f"schedule_v48.xlsx", use_container_width=True)

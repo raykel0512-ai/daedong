@@ -1,4 +1,4 @@
-# app.py — 시험 시감 자동 편성 v5.0
+# app.py — 시험 시감 자동 편성 v5.0 (메모장 접이식 업데이트)
 import streamlit as st, pandas as pd, re, json
 from collections import defaultdict
 from io import BytesIO
@@ -11,7 +11,7 @@ from scheduler import (
 
 st.set_page_config(page_title="시험 시감 자동 편성 v5.0", layout="wide")
 st.title("🧮 시험 시감 자동 편성 v5.0")
-st.caption("백지연쌤 화이팅! 💪 | 공유 메모장 | 실시간 위반 검증 | 클라우드 저장")
+st.caption("백지연쌤 화이팅! 💪 | 접이식 공유 메모장 | 실시간 위반 검증 | 클라우드 저장")
 
 # ══════════════════════════════════════════════════════════════
 # 구글 시트 API 클라이언트
@@ -71,23 +71,27 @@ def load_memo(url, tab_name):
     except: return ""
 
 # ══════════════════════════════════════════════════════════════
-# 공유 메모장 (최상단 배치)
+# 공유 메모장 (접이식 Expander 적용)
 # ══════════════════════════════════════════════════════════════
-st.markdown("### 📝 공유 메모장")
-if "memo_text" not in st.session_state: st.session_state["memo_text"] = ""
+if "memo_text" not in st.session_state: 
+    st.session_state["memo_text"] = ""
 
-m_col1, m_col2 = st.columns([5, 1])
-with m_col1:
-    memo_input = st.text_area("공유할 내용을 적으세요 (엔터로 줄바꿈 가능)", value=st.session_state["memo_text"], height=100)
-with m_col2:
-    st.write("") # 간격 조절
-    if st.button("💾 메모 저장", use_container_width=True):
-        save_memo(raw_sheet_url, memo_tab_name, memo_input)
-        st.session_state["memo_text"] = memo_input
-    if st.button("🔄 메모 불러오기", use_container_width=True):
-        loaded_memo = load_memo(raw_sheet_url, memo_tab_name)
-        st.session_state["memo_text"] = loaded_memo
-        st.rerun()
+with st.expander("📝 공유 메모장 (클릭하여 펼치기/접기)", expanded=False):
+    memo_input = st.text_area("공유할 내용을 적으세요 (엔터로 줄바꿈 가능)", 
+                              value=st.session_state["memo_text"], 
+                              height=200, 
+                              placeholder="배정 시 주의사항이나 공지사항을 입력하세요...")
+    
+    m_btn_col1, m_btn_col2, _ = st.columns([1, 1, 4])
+    with m_btn_col1:
+        if st.button("💾 메모 저장", use_container_width=True):
+            save_memo(raw_sheet_url, memo_tab_name, memo_input)
+            st.session_state["memo_text"] = memo_input
+    with m_btn_col2:
+        if st.button("🔄 메모 불러오기", use_container_width=True):
+            loaded_memo = load_memo(raw_sheet_url, memo_tab_name)
+            st.session_state["memo_text"] = loaded_memo
+            st.rerun()
 
 # ══════════════════════════════════════════════════════════════
 # 명단 로드 및 배정 로직

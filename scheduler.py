@@ -97,7 +97,7 @@ def can_assign(t: Teacher, d: int, p: int, g: int, c: int) -> bool:
     if (d, p) in t.exclude_times: return False
     if (g, c) in t.exclude_classes: return False
     if (d, p, g, c) in t.exclude_time_class: return False
-    if (g, c) in t.extra_classes: return False
+    if (g, c) in t.extra_classes: return False  # extra_classes = 기피반(회피). 이름과 달리 '제외' 동작.
     return True
 
 def run_assignment(teachers: list[Teacher], num_days, num_grades, classes_per_grade, periods_by_day_grade) -> dict:
@@ -165,7 +165,9 @@ def compute_teacher_stats(assignments, teacher_list):
         prio = t_obj.priority if t_obj and t_obj.priority < 999 else "-"
         corridor_count = len(t_obj.specific_excludes) if t_obj else 0
         rows.append({"이름": name, "우선순위": prio, "정감독": c_chief[name], "부감독": c_asst[name], "복도감독": corridor_count, "합계": c_chief[name] + c_asst[name] + corridor_count})
-    return sorted(rows, key=lambda x: (str(x["우선순위"]) if x["우선순위"] != "-" else "999", -x["정감독"]))
+    # 우선순위는 숫자로 정렬해야 함 (문자열 정렬 시 "10"이 "2"보다 앞에 오는 버그 방지).
+    # 우선순위 없음("-")은 맨 뒤로 보냄.
+    return sorted(rows, key=lambda x: (x["우선순위"] if isinstance(x["우선순위"], int) else 9999, -x["정감독"]))
 
 def compute_parent_stats(assignments, teacher_list, num_days):
     daily = defaultdict(lambda: defaultdict(int))

@@ -11,7 +11,6 @@ from scheduler import (
 
 st.set_page_config(page_title="시험 시감 자동 편성 v5.0", layout="wide")
 st.title("🧮 시험 시감 자동 편성 v5.0")
-st.caption("백지연쌤 화이팅! 💪 | 접이식 공유 메모장 | 실시간 위반 검증 | 클라우드 저장")
 
 # ══════════════════════════════════════════════════════════════
 # 구글 시트 API 클라이언트
